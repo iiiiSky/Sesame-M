@@ -98,3 +98,5 @@ jobs:
                 - `universal`:全架构包,无法确定架构时使用
               * 要求`Android 8.0`(API 26)及以上系统
             > 本 APP 是为了学习研究用,请于 24 小时内卸载本 APP。
+
+# force workflow registration

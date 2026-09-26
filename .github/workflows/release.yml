@@ -3,6 +3,12 @@ name: Android CI
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要附加 APK 的 Release tag（留空则使用最新 Release）'
+        required: false
+        default: '1.2.5'
 
 jobs:
   build:
@@ -29,7 +35,15 @@ jobs:
       - name: Resolve version from tag
         id: resolve_version
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            RAW="${GITHUB_REF_NAME}"
+          elif [ -n "${{ github.event.inputs.tag }}" ]; then
+            RAW="${{ github.event.inputs.tag }}"
+          else
+            RAW=$(curl -s "${{ github.api_url }}/repos/${{ github.repository }}/releases/latest" | jq -r .tag_name)
+          fi
+          VERSION="${RAW#v}"
+          echo "RAW_TAG=$RAW" >> "$GITHUB_OUTPUT"
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           echo "version=${VERSION}"
 
@@ -83,9 +97,9 @@ jobs:
       - name: Upload signed assets to Release
         uses: softprops/action-gh-release@v3
         with:
-          name: ${{ github.event.release.tag_name }}
+          name: ${{ steps.resolve_version.outputs.RAW_TAG }}
           files: release-signed/*
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ steps.resolve_version.outputs.RAW_TAG }}
           draft: false
           append_body: true
           generate_release_notes: true

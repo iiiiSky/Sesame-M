@@ -63,6 +63,59 @@ public class AntMemberRpcCall {
     }
 
     /**
+     * 黄金票收取（兼容）
+     */
+    public static String goldBillCollect() {
+        return ApplicationHook.requestString("com.alipay.wealthgoldtwa.goldbill.v2.index.collect", "[{}]");
+    }
+
+    /**
+     * 黄金票首页数据
+     */
+    public static String queryGoldTicketHome() {
+        try {
+            JSONObject args = new JSONObject();
+            args.put("bizScene", "ch_alipaysearch__chsub_normal");
+            args.put("chInfo", "ch_alipaysearch__chsub_normal");
+            args.put("taskId", "");
+            return ApplicationHook.requestString("com.alipay.wealthgoldtwa.needle.v2.index",
+                    new JSONArray().put(args).toString());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 黄金票首页场景收取（新版）
+     */
+    public static String goldTicketIndexCollect() {
+        try {
+            JSONObject args = new JSONObject();
+            args.put("directModeDisableCollect", 1);
+            args.put("from", "antfarm");
+            args.put("trigger", "Y");
+            return ApplicationHook.requestString("com.alipay.wealthgoldtwa.needle.index.collect",
+                    new JSONArray().put(args).toString());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 福利中心刷新
+     */
+    public static String welfareCenterUpdate(int modeBitMask) {
+        try {
+            JSONObject args = new JSONObject();
+            args.put("modeBitMask", modeBitMask);
+            return ApplicationHook.requestString("com.alipay.finaggexpbff.needle.welfareCenter.update",
+                    new JSONArray().put(args).toString());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
      * [新增] 查询黄金票提取页信息
      * 用于获取最新的可用数量、基金ID (productId) 和 赠送份数 (bonusAmount)
      */
@@ -543,6 +596,16 @@ public class AntMemberRpcCall {
      * 另一种实现方案的 version：本模块**原有取值**，收敛到 {@link TaskAlternative} 时原样保留，不改已实测路径的报文。
      */
     public static final String DO_FARM_TASK_VERSION = "20250812.01";
+
+    /**
+     * 查询「最近一次操作任务」：join 被 {@code PROMISE_HAS_PROCESSING_TEMPLATE}（存在进行中的生活记录）拒绝时，
+     * 用它取回那条记录的 {@code recordId} 继续推完。
+     * <p>抓包实测请求体为 {@code [{version:"new"}]}；响应 {@code data.lastOperateTaskVO} 含
+     * {@code templateId / recordId / finishFlag / completedNum / needCompleteNum}。
+     */
+    public static String queryLastOperateTask() {
+        return ApplicationHook.requestString("com.antgroup.zmxy.zmmemberop.biz.rpc.creditaccumulate.CreditAccumulateStrategyRpcManager.queryLastOperateTask", "[{\"version\":\"new\"}]");
+    }
 
     /**
      * 另一种实现方案：按 bizKey 完成任务（{@code com.alipay.antfarm.doFarmTask}）。

@@ -38,6 +38,7 @@ jobs:
           fi
 
       - name: Create release following upstream tag
+        id: create_release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -46,8 +47,10 @@ jobs:
           FORK_REPO="iiiiSky/Sesame-M"
           UP_TAG=$(gh api "repos/$UP_REPO/releases" --jq '[.[] | select(.draft==false)][0].tag_name')
           echo "上游最新 release tag: $UP_TAG"
+          echo "up_tag=$UP_TAG" >> "$GITHUB_OUTPUT"
           if gh api "repos/$FORK_REPO/git/refs/tags/$UP_TAG" >/dev/null 2>&1; then
             echo "::notice::fork 已存在 tag $UP_TAG，跳过创建"
+            echo "created=false" >> "$GITHUB_OUTPUT"
           else
             HEAD=$(git rev-parse HEAD)
             gh api "repos/$FORK_REPO/git/refs" \
@@ -57,4 +60,20 @@ jobs:
               -F draft=false -F prerelease=false \
               -f body="> 自动同步上游 $UP_REPO 后发布的 $UP_TAG" >/dev/null
             echo "::notice::已创建 release $UP_TAG"
+            echo "created=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Trigger Android CI to build APKs (fork release event workaround)
+        if: steps.create_release.outputs.created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          FORK_REPO="iiiiSky/Sesame-M"
+          UP_TAG="${{ steps.create_release.outputs.up_tag }}"
+          echo "为 tag $UP_TAG 触发 Android CI 构建 APK..."
+          gh api -X POST "repos/$FORK_REPO/actions/workflows/release.yml/dispatches" \
+            --input - <<EOF
+        {"ref":"MIUIX-api102","inputs":{"tag":"$UP_TAG"}}
+      EOF
+          echo "::notice::已触发 Android CI 构建 $UP_TAG"

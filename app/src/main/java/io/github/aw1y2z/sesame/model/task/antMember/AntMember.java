@@ -11,8 +11,12 @@ import io.github.aw1y2z.sesame.data.ModelGroup;
 import io.github.aw1y2z.sesame.data.modelFieldExt.BooleanModelField;
 import io.github.aw1y2z.sesame.data.modelFieldExt.SelectModelField;
 import io.github.aw1y2z.sesame.data.task.ModelTask;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy;
+import io.github.aw1y2z.sesame.data.task.TaskAward;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy.Outcome;
 import io.github.aw1y2z.sesame.entity.AlipayAntMemberTaskList;
 import io.github.aw1y2z.sesame.entity.AlipayMemberCreditSesameTaskList;
+import io.github.aw1y2z.sesame.entity.AlipayWelfareFundTaskList;
 import io.github.aw1y2z.sesame.entity.MemberBenefit;
 import io.github.aw1y2z.sesame.hook.ApplicationHook;
 import io.github.aw1y2z.sesame.model.base.TaskCommon;
@@ -45,9 +49,13 @@ public class AntMember extends ModelTask {
      */
     private final Map<String, String> pendingVerifyTasks = new LinkedHashMap<>();
 
+
     /** 同轮核对配置（见 TaskAlternative.verify） */
     private static final TaskAlternative.VerifyConfig VERIFY_CFG = new TaskAlternative.VerifyConfig(
             "AntMember", "AntMemberTaskList", "会员任务", "游戏中心", "🎮完成", true, msg -> Log.other(msg));
+
+    /** 游戏中心宝箱每日上限（首页 {@code taskModule.dailyTaskCertCntUpperLimit} 的兜底值）。 */
+    private static final int GAME_CENTER_CERT_LIMIT = 30;
     
     @Override
     public String getName() {
@@ -77,6 +85,13 @@ public class AntMember extends ModelTask {
     private BooleanModelField enableGoldTicketConsume;
     private BooleanModelField KuaiDiFuLiJia;
 
+    /** 网商银行福利金 */
+    private BooleanModelField welfareFund;
+    private BooleanModelField welfareFundSign;
+    private BooleanModelField welfareFundTask;
+    private BooleanModelField AutoWelfareFundTaskList;
+    private SelectModelField WelfareFundTaskList;
+
     @Override
     public ModelFields getFields() {
         ModelFields modelFields = new ModelFields();
@@ -96,6 +111,11 @@ public class AntMember extends ModelTask {
         modelFields.addField(KuaiDiFuLiJia = new BooleanModelField("KuaiDiFuLiJia", "我的快递 | 福利加", false));
         modelFields.addField(enableGoldTicket = new BooleanModelField("enableGoldTicket", "黄金票 | 签到与收取", false));
         modelFields.addField(enableGoldTicketConsume = new BooleanModelField("enableGoldTicketConsume", "黄金票 | 提取/兑换黄金", false));
+        modelFields.addField(welfareFund = new BooleanModelField("welfareFund", "福利金 | 开启", false));
+        modelFields.addField(welfareFundSign = new BooleanModelField("welfareFundSign", "福利金 | 签到", true).setDependsOn("welfareFund"));
+        modelFields.addField(welfareFundTask = new BooleanModelField("welfareFundTask", "福利金 | 任务", true).setDependsOn("welfareFund"));
+        modelFields.addField(AutoWelfareFundTaskList = new BooleanModelField("AutoWelfareFundTaskList", "福利金任务 | 自动黑名单", true).setDependsOn("welfareFundTask"));
+        modelFields.addField(WelfareFundTaskList = new SelectModelField("WelfareFundTaskList", "福利金任务 | 黑名单列表", new LinkedHashSet<>(), AlipayWelfareFundTaskList::getList).setDependsOn("AutoWelfareFundTaskList"));
         return modelFields;
     }
     
@@ -151,12 +171,17 @@ public class AntMember extends ModelTask {
                 checkAndDoSignIn();
                 //查询并处理任务列表
                 queryAndProcessTaskList();
-                //游戏任务列表（原先该方法没有任何调用点，游戏类任务从未执行过）
-                queryTaskList();
+                //游戏中心任务奖励（整场景一键领取；游戏类任务需真实游玩才能推进，不做完成尝试）
+                gameCenterTaskPrize();
 
                 //查询玩乐豆小球列表，有则领取
                 queryPointBallList();
                 
+            }
+            // 网商银行福利金（余额/签到/任务）
+            if (welfareFund.getValue()) {
+                WelfareFund.run(welfareFundSign.getValue(), welfareFundTask.getValue(),
+                        AutoWelfareFundTaskList.getValue(), WelfareFundTaskList.getValue());
             }
         }
         catch (Throwable t) {
@@ -168,7 +193,8 @@ public class AntMember extends ModelTask {
         try {
             //初始化AntMemberTaskListMap
             AntMemberTaskListMap.load();
-            Set<String> blackList = new HashSet<>();
+            // 预置黑名单登记在 MessageUtil（单一真相，配置页据此标注"默认"）
+            Set<String> blackList = MessageUtil.presetBlackList("AntMember", "AntMemberTaskList");
             //blackList.add("去淘金币逛一逛");
             // 可继续添加更多黑名单任务
             
@@ -218,19 +244,27 @@ public class AntMember extends ModelTask {
                     }
                 }
                 
-                // 游戏任务列表（游戏中心）的任务也要进候选，否则用户看不到、也无法手动勾选
-                jo = new JSONObject(AntMemberRpcCall.queryTaskList());
-                if (MessageUtil.checkSuccess(TAG, jo)) {
-                    JSONObject gameData = jo.optJSONObject("data");
-                    JSONObject gameTaskModule = gameData == null ? null : gameData.optJSONObject("gameTaskModule");
-                    JSONArray gameTaskList = gameTaskModule == null ? null : gameTaskModule.optJSONArray("gameTaskList");
-                    if (gameTaskList != null) {
-                        for (int i = 0; i < gameTaskList.length(); i++) {
-                            String subTitle = gameTaskList.getJSONObject(i).optString("subTitle");
-                            if (!subTitle.isEmpty()) {
-                                AntMemberTaskListMap.add(subTitle, subTitle);
-                            }
+                // 游戏中心任务流里的任务也要进候选，否则用户看不到、也无法手动勾选
+                // （原读取的 v4.queryTaskList 实测恒返回空 data，连带这里一直拿不到任务）
+                for (int feedPage = 0; feedPage < 5; feedPage++) {
+                    jo = new JSONObject(AntMemberRpcCall.gameCenterGameFeeds(feedPage, 10));
+                    if (!MessageUtil.checkSuccess(TAG, jo)) {
+                        break;
+                    }
+                    JSONObject feedsData = jo.optJSONObject("data");
+                    JSONArray feedsList = feedsData == null ? null : feedsData.optJSONArray("feedsList");
+                    if (feedsList == null || feedsList.length() == 0) {
+                        break;
+                    }
+                    for (int i = 0; i < feedsList.length(); i++) {
+                        JSONObject feed = feedsList.optJSONObject(i);
+                        String title = feed == null ? "" : gameCenterTaskTitle(feed);
+                        if (!title.isEmpty()) {
+                            AntMemberTaskListMap.add(title, title);
                         }
+                    }
+                    if (!feedsData.optBoolean("haveNextPage", false)) {
+                        break;
                     }
                 }
                 
@@ -254,35 +288,14 @@ public class AntMember extends ModelTask {
             }
             //初始化MemberCreditSesameTaskListMap
             MemberCreditSesameTaskListMap.load();
-            blackList = new HashSet<>();
-            // 实测（2026-09-22 抓包 logs/chk_sesame3）：芝麻粒任务走 taskFeedback 后服务端**不校验是否真的参与过**，
-            // 未报名的「去玩xx」一次即 success ⇒ 游戏/浏览/签到/组件/施肥类不再预置拉黑，全部交给任务循环自动完成。
-            // 仍预置拉黑的只剩**真实交易/履约类**（下单/租赁/订酒店/回收/雇佣/付钱/查车），
-            // 这类没真做就申报"完成"属虚假履约，有风控风险
-            blackList.add("用额度免押金下单");
-            blackList.add("去租赁下单");
-            blackList.add("芝麻租赁下单得芝麻粒");
-            blackList.add("去飞猪订酒店");
-            blackList.add("0.1元起租会员攒粒");
-            blackList.add("9.9元抢租3天大疆");
-            blackList.add("1分起囤神券茶咖美食");
-            blackList.add("完成旧衣回收得现金");
-            blackList.add("去雇佣芝麻大表鸽");
-            blackList.add("送你10.6元支付红包");
-            blackList.add("一键查询爱车估值");
+            // 芝麻粒任务走 taskFeedback 后服务端不校验是否真的参与过，未报名任务一发即 success
+            // ⇒ 游戏/浏览/签到/组件/施肥类不再预置拉黑，交给任务循环自动完成。
+            // 仍预置拉黑的只剩真实交易/履约类（下单/租赁/订酒店/回收/雇佣/付钱/查车）：没真做就申报"完成"属虚假履约，有风控风险
+            // 预置集登记在 MessageUtil（单一真相，配置页据此标注"默认"）
+            blackList = MessageUtil.presetBlackList("AntMember", "MemberCreditSesameTaskList");
             // 可继续添加更多黑名单任务
             
-            whiteList = new HashSet<>();// 从黑名单中移除该任务
-            whiteList.add("逛一逛芝麻树");
-            whiteList.add("浏览15秒视频广告");
-            whiteList.add("逛15秒商品橱窗");
-            whiteList.add("逛一逛集汗滴找现金");
-            whiteList.add("去体验先用后付");
-            whiteList.add("去抛竿钓鱼");
-            whiteList.add("去参与花呗活动");
-            whiteList.add("坚持攒保障金");
-            whiteList.add("去领支付宝积分");
-            whiteList.add("去浏览租赁大促会场");
+            whiteList = new HashSet<>();
             // 可继续添加更多白名单任务
             for (String task : blackList) {
                 MemberCreditSesameTaskListMap.add(task, task);
@@ -366,6 +379,38 @@ public class AntMember extends ModelTask {
         }
     }
     
+    /**
+     * 列表状态探针：重拉积分凭证列表（该列表是"待领"清单），按 id 逐页匹配——
+     * 仍在列表＝确实没领到；消失了＝已领到。一次都没拉到则返回 UNKNOWN（不据此判"已领到"）。
+     */
+    private static TaskAttemptPolicy.ProbeResult probePointCertStatus(int page, int pageSize, String certId) {
+        try {
+            boolean anyFetched = false;
+            for (int p = 1; p <= page; p++) {
+                JSONObject jo = new JSONObject(AntMemberRpcCall.queryPointCert(p, pageSize));
+                if (!MessageUtil.checkResultCode(TAG, jo)) {
+                    continue;
+                }
+                anyFetched = true;
+                JSONArray certList = jo.optJSONArray("certList");
+                if (certList == null) {
+                    continue;
+                }
+                for (int i = 0; i < certList.length(); i++) {
+                    JSONObject cert = certList.optJSONObject(i);
+                    if (cert != null && certId.equals(cert.optString("id"))) {
+                        return TaskAttemptPolicy.ProbeResult.TODO;
+                    }
+                }
+            }
+            // 凭证已不在待领清单里：视为已领到；但一次都没拉到列表时不可据此判定
+            return anyFetched ? TaskAttemptPolicy.ProbeResult.RECEIVED : TaskAttemptPolicy.ProbeResult.UNKNOWN;
+        } catch (Throwable t) {
+            Log.err(TAG, "probePointCertStatus err:", t);
+            return TaskAttemptPolicy.ProbeResult.UNKNOWN;
+        }
+    }
+
     private void queryPointCert(int page, int pageSize) {
         try {
             JSONObject jo = new JSONObject(AntMemberRpcCall.queryPointCert(page, pageSize));
@@ -390,8 +435,13 @@ public class AntMember extends ModelTask {
                 if (MessageUtil.checkResultCode(TAG, jo)) {
                     Log.other("会员任务🎖️领取[" + bizTitle + "]奖励#获得[" + pointAmount + "积分]");
                 } else {
-                    //检查并标记黑名单任务
-                    MessageUtil.checkResultCodeAndMarkTaskBlackList("AntMemberTaskList", bizTitle, jo);
+                    // 领奖收口：先按积分凭证列表复核"已领到"，未确认才交自动拉黑（顺序由 TaskAward 固定）
+                    // 失败响应另存 final：jo 在循环里会被反复赋值，不能直接被 lambda 捕获
+                    final JSONObject failJo = jo;
+                    TaskAward.confirmReceivedOrBlackList("会员任务🎖️领取",
+                            k -> probePointCertStatus(page, pageSize, id), id, bizTitle,
+                            () -> MessageUtil.checkResultCodeAndMarkTaskBlackList("AntMemberTaskList", bizTitle, failJo),
+                            msg -> Log.other(msg));
                 }
             }
             if (hasNextPage) {
@@ -1315,7 +1365,7 @@ public class AntMember extends ModelTask {
                     String wua = new AntOrchard().getWua();
                     String source = "DNHZ_NC_zhimajingnangSF";
                     
-                    JSONObject spreadManureData = new JSONObject(AntOrchardRpcCall.orchardSpreadManure(false, wua));
+                    JSONObject spreadManureData = new JSONObject(AntOrchardRpcCall.orchardSpreadManure("main", false, wua));
                     
                     if (!"100".equals(spreadManureData.optString("resultCode"))) {
                         continue;
@@ -1479,6 +1529,18 @@ public class AntMember extends ModelTask {
             if (AntMemberTaskList.getValue().contains(subTitle)) {
                 return;
             }
+            // 底线：交易/支付类任务一律不申报、一次即**永久**拉黑（不进"满 N 天解禁重试"生命周期）。
+            // 本调用点的 TaskAttemptPolicy.Site 未带 bizKey/listField，handle 顶部那条通用判定到不了这里，
+            // 故在此显式拦；bizKey 取值与 attemptDoTask 伪申报时一致。
+            String txBizKey = taskObj.optString("bizKey", "").trim();
+            if (txBizKey.isEmpty()) {
+                txBizKey = taskId;
+            }
+            if (TaskAlternative.isTransactionTask(txBizKey)) {
+                MessageUtil.MarkTaskBlackListPermanent("AntMember", "AntMemberTaskList", "会员任务", subTitle);
+                Log.other("游戏中心⏭️交易/履约类[" + subTitle + "]#不申报，已永久拉黑");
+                return;
+            }
             // 任务未完成且需要报名（needSignUp 可能缺字段，用 optBoolean 避免整条任务被异常打断）
             if ("NOT_DONE".equals(taskStatus) && taskObj.optBoolean("needSignUp", false)) {
                 JSONObject jsonObject = new JSONObject(AntMemberRpcCall.doTaskSignup(taskId));
@@ -1490,27 +1552,51 @@ public class AntMember extends ModelTask {
             }
 
             // 执行任务：原先只处理 actionType=VIEW，其它类型直接 return（列表拿到了却静默不处理、
-            // 连日志都没有）。现在各类都尝试一次。
-            JSONObject doTaskjo = new JSONObject(AntMemberRpcCall.doTaskSend(taskId));
-            if (MessageUtil.checkSuccess(TAG, doTaskjo)) {
-                Log.other("游戏中心🎮完成任务[" + subTitle + "]#待领[" + prizeAmount + "玩乐豆]");
-            } else {
-                // doTaskSend 常被 400000040 拒绝，改用另一种实现方案（见 TaskAlternative）
-                String sceneCode = taskObj.optString("sceneCode", "").trim();
-                if (TaskAlternative.hit(doTaskjo, sceneCode)) {
-                    // 另一种实现方案（见 TaskAlternative）；version 传本模块原值
-                    TaskAlternative.trigger(pendingVerifyTasks, taskId, subTitle, taskId, sceneCode,
-                            AntMemberRpcCall.DO_FARM_TASK_VERSION, "游戏中心", msg -> Log.other(msg));
-                } else {
-                    Log.other("游戏中心⚠️未完成[" + subTitle + "]#actionType=" + actionType);
-                    //检查并标记黑名单任务
-                    MessageUtil.checkResultCodeAndMarkTaskBlackList("AntMemberTaskList", subTitle, doTaskjo);
-                }
-            }
+            // 连日志都没有）。现在各类都尝试一次；做不了的当天只试一次（见 TaskAttemptPolicy）
+            // 完成与否一律以任务列表为准（探针 probeMemberStatus 复核），响应不可信；
+            // 兜底后的核对仍交给本模块的 verifyPendingTasks，故 listField 传 null（黑名单由 verify 管）
+            TaskAttemptPolicy.handle("member::game::" + taskId, subTitle, null,
+                    () -> attemptDoTask(taskObj, taskId, subTitle, actionType, prizeAmount), Log::other,
+                    new TaskAttemptPolicy.Site(null, "游戏中心", null, taskObj.optString("sceneCode", "").trim(),
+                            (k) -> probeMemberStatus(taskId)));
         }
         catch (Throwable t) {
             Log.err(TAG, "doTask err:", t);
         }
+    }
+
+    /** 游戏中心任务上报：doTaskSend 常被 400000040 拒绝，改用兜底方案；做不了的不写任务黑名单 */
+    private Outcome attemptDoTask(JSONObject taskObj, String taskId, String subTitle, String actionType, int prizeAmount) {
+        try {
+            JSONObject doTaskjo = new JSONObject(AntMemberRpcCall.doTaskSend(taskId));
+            if (MessageUtil.checkSuccess(TAG, doTaskjo)) {
+                Log.other("游戏中心🎮完成任务[" + subTitle + "]#待领[" + prizeAmount + "玩乐豆]");
+                return Outcome.DONE;
+            }
+            if (MessageUtil.isRetryable(doTaskjo) || MessageUtil.isServerBusy(doTaskjo)) {
+                return Outcome.RETRY;
+            }
+            // 另一种实现方案（见 TaskAlternative）；version 传本模块原值。
+            // bizKey 优先取任务自带的：游戏中心任务流的 bizKey/gameId 与 v3 的 taskId 不是一回事
+            String sceneCode = taskObj.optString("sceneCode", "").trim();
+            // 本模块自行伪申报并登记同轮核对（verifyPendingTasks），故返回 FORGED 而不是交给通用类
+            if (TaskAlternative.hit(doTaskjo, sceneCode)) {
+                String bizKey = taskObj.optString("bizKey", "").trim();
+                if (bizKey.isEmpty()) {
+                    bizKey = taskId;
+                }
+                TaskAlternative.trigger(pendingVerifyTasks, taskId, subTitle, bizKey, sceneCode,
+                        AntMemberRpcCall.DO_FARM_TASK_VERSION, "游戏中心", msg -> Log.other(msg));
+                return Outcome.FORGED;
+            }
+            Log.other("游戏中心⚠️未完成[" + subTitle + "]#actionType=" + actionType);
+            //检查并标记黑名单任务
+            MessageUtil.checkResultCodeAndMarkTaskBlackList("AntMemberTaskList", subTitle, doTaskjo);
+            return Outcome.UNABLE;
+        } catch (Throwable t) {
+            Log.err(TAG, "doTaskSend err:", t);
+        }
+        return Outcome.RETRY;
     }
 
     /**
@@ -1522,15 +1608,54 @@ public class AntMember extends ModelTask {
         TaskAlternative.verify(pendingVerifyTasks, VERIFY_CFG, () -> {
             Set<String> notDone = new LinkedHashSet<>();
             collectNotDoneIds(AntMemberRpcCall.queryModularTaskList(), notDone);
-            collectNotDoneIds(AntMemberRpcCall.queryTaskList(), notDone);
             return notDone;
         });
     }
 
+    /** 列表状态探针：重拉游戏中心任务列表，按 taskId 匹配；仅 NOT_DONE 视为未完成（消失即已完成）。 */
+    private static TaskAttemptPolicy.ProbeResult probeMemberStatus(String taskId) {
+        try {
+            JSONObject data = new JSONObject(AntMemberRpcCall.queryModularTaskList()).optJSONObject("data");
+            if (data == null) {
+                return TaskAttemptPolicy.ProbeResult.UNKNOWN;
+            }
+            JSONArray modules = data.optJSONArray("taskModuleList");
+            if (modules == null) {
+                return TaskAttemptPolicy.ProbeResult.UNKNOWN;
+            }
+            for (int i = 0; i < modules.length(); i++) {
+                JSONObject module = modules.optJSONObject(i);
+                JSONArray tasks = module == null ? null : module.optJSONArray("taskList");
+                if (tasks == null) {
+                    continue;
+                }
+                for (int j = 0; j < tasks.length(); j++) {
+                    JSONObject task = tasks.optJSONObject(j);
+                    if (task == null || !taskId.equals(task.optString("taskId", "").trim())) {
+                        continue;
+                    }
+                    String status = task.optString("taskStatus", "").trim();
+                    if ("NOT_DONE".equals(status)) {
+                        return TaskAttemptPolicy.ProbeResult.TODO;
+                    }
+                    if ("RECEIVED".equals(status)) {
+                        return TaskAttemptPolicy.ProbeResult.RECEIVED;
+                    }
+                    return TaskAttemptPolicy.ProbeResult.FINISHED;
+                }
+            }
+            // 任务已从列表消失：视为已完成且已领
+            return TaskAttemptPolicy.ProbeResult.GONE;
+        } catch (Throwable t) {
+            Log.err(TAG, "probeMemberStatus err:", t);
+            return TaskAttemptPolicy.ProbeResult.UNKNOWN;
+        }
+    }
+
     /**
-     * 从任务列表响应里收集 {@code taskStatus=NOT_DONE} 的 taskId。
-     * <p>两套列表结构不同（v3 {@code data.taskModuleList[].taskList[]}、
-     * v4 {@code data.gameTaskModule.gameTaskList[]}），这里都解析一遍，避免漏判导致误拉黑。
+     * 从 v3 任务列表响应里收集 {@code taskStatus=NOT_DONE} 的 taskId
+     * （{@code data.taskModuleList[].taskList[]}）。
+     * <p>原先还会解析 v4 的 {@code data.gameTaskModule.gameTaskList}，该接口实测恒空、已弃用。
      */
     private static void collectNotDoneIds(String response, Set<String> out) {
         try {
@@ -1545,14 +1670,12 @@ public class AntMember extends ModelTask {
                     collectNotDoneFromArray(module == null ? null : module.optJSONArray("taskList"), out);
                 }
             }
-            JSONObject gameTaskModule = data.optJSONObject("gameTaskModule");
-            if (gameTaskModule != null) {
-                collectNotDoneFromArray(gameTaskModule.optJSONArray("gameTaskList"), out);
-            }
+
         } catch (Throwable t) {
             Log.err(TAG, "collectNotDoneIds err:", t);
         }
     }
+
 
     private static void collectNotDoneFromArray(JSONArray tasks, Set<String> out) {
         if (tasks == null) {
@@ -1599,43 +1722,87 @@ public class AntMember extends ModelTask {
     }
     
     /**
-     * 游戏任务列表（游戏中心）
-     * <p>原先该方法没有任何调用点（死代码），这里的游戏类任务从未被执行过；
-     * 并且 {@code optJSONObject("gameTaskModule")} 为 null 时直接取 optJSONArray 会 NPE，
-     * 被 catch 吞掉后整份列表一个任务都处理不了，这里一并修掉。
+     * 游戏中心（会员场景 xlyy_WJCNJT）宝箱领取。
+     * <p>任务流 {@code queryGameFeeds} 里的条目都是「玩游戏得1个宝箱」（只有
+     * gameId/cardId/appId + taskDesc，没有 taskId/taskStatus）；官方客户端在该场景同样只查不写
+     * （query* + batchReceiveTaskPrize），宝箱由游戏侧上报才 +1——实测 doFarmTask 的
+     * bizKey/taskSceneCode 七种组合全回 307「任务不存在」，所以这里不对任务流发完成请求，
+     * 只在首页报有待领时把宝箱领掉；任务名仍进「会员任务」黑名单候选，供手动剔除。
+     * <p>待领判据取官方字段：{@code taskModule.needReceive} / {@code needReceiveTaskCertCnt}，
+     * 上限 {@code reachTaskCertLimit}（{@code dailyTaskCertCntUpperLimit}，30/天）。
      */
-    public void queryTaskList() {
+    public void gameCenterTaskPrize() {
         try {
-            JSONObject jsonObject = new JSONObject(AntMemberRpcCall.queryTaskList());
-            if (!MessageUtil.checkSuccess(TAG, jsonObject)) {
+            JSONObject homeJo = new JSONObject(AntMemberRpcCall.gameCenterHomePage());
+            if (!MessageUtil.checkSuccess(TAG, homeJo)) {
+                Log.record("游戏中心首页异常：" + homeJo);
                 return;
             }
-            JSONObject data = jsonObject.optJSONObject("data");
-            if (data == null) {
+            JSONObject homeData = homeJo.optJSONObject("data");
+            JSONObject taskModule = homeData == null ? null : homeData.optJSONObject("taskModule");
+            if (taskModule == null) {
                 return;
             }
-            JSONObject gameTaskModule = data.optJSONObject("gameTaskModule");
-            JSONArray gameTaskList = gameTaskModule == null ? null : gameTaskModule.optJSONArray("gameTaskList");
-            if (gameTaskList == null || gameTaskList.length() == 0) {
-                // 抓包实测(2026-09-22)：该接口当前恒返回 data:{}，且全量抓包里从未出现 gameTaskModule，
-                // 说明这个取值路径本身可能就是错的（只是恰好空返回才没报错）。一旦服务端真返回任务，
-                // 把顶层字段名打出来，便于按真实结构适配，避免又一次"静默拿不到任务"
-                if (data.length() > 0 && gameTaskModule == null) {
-                    String raw = data.toString();
-                    Log.other("游戏中心⚠️任务列表结构未知#data=" + (raw.length() > 300 ? raw.substring(0, 300) : raw));
-                }
+            if (taskModule.optBoolean("reachTaskCertLimit", false)) {
+                Log.record("游戏中心宝箱已达今日上限（"
+                        + taskModule.optString("taskProgressDesc", GAME_CENTER_CERT_LIMIT + "/天") + "）");
                 return;
             }
-            for (int i = 0; i < gameTaskList.length(); i++) {
-                processTask(gameTaskList.getJSONObject(i));
+            boolean needReceive = homeData.has("taskPrizePopup") || taskModule.optBoolean("needReceive", false)
+                    || taskModule.optInt("needReceiveTaskCertCnt", 0) > 0;
+            if (!needReceive) {
+                return;
             }
-            // 核对本轮 doFarmTask 的结果（响应不可信，以任务列表为准）
-            verifyPendingTasks();
+
+            JSONObject receiveJo = new JSONObject(AntMemberRpcCall.batchReceiveTaskPrize());
+            if (!MessageUtil.checkSuccess(TAG, receiveJo)) {
+                Log.record("游戏中心宝箱领取失败：" + receiveJo);
+                return;
+            }
+            JSONObject receiveData = receiveJo.optJSONObject("data");
+            JSONObject prizePopup = receiveData == null ? null : receiveData.optJSONObject("prizePopup");
+            String tip = prizePopup == null ? "" : prizePopup.optString("subTitle", "").trim();
+            if (tip.isEmpty() && prizePopup != null) {
+                tip = prizePopup.optString("actionText", "").trim();
+            }
+            String desc = taskModule.optString("taskProgressDesc", "").trim();
+            Log.other("游戏中心🎁领取宝箱" + (tip.isEmpty() ? "" : "#" + tip) + (desc.isEmpty() ? "" : "#" + desc));
         }
         catch (Throwable t) {
-            Log.err(TAG, "queryTaskList err:", t);
+            Log.err(TAG, "gameCenterTaskPrize err:", t);
         }
     }
+
+    /**
+     * 游戏中心任务流条目在「会员任务｜黑名单列表」里的标题（如「九梦仙域：玩游戏得1个宝箱」）。
+     * <p>字段实测（2026-10-07 抓包）：{@code mainTitle}=游戏名、{@code subTitle}=宣传语、
+     * {@code taskDesc}=「玩游戏得1个宝箱」、{@code taskTagText}=「玩游戏得」。
+     */
+    private static String gameCenterTaskTitle(JSONObject feed) {
+        String title = firstNonEmpty(feed, "mainTitle", "subTitle");
+        String taskDesc = firstNonEmpty(feed, "taskDesc", "taskTagText");
+        if (title.isEmpty()) {
+            title = taskDesc;
+        } else if (!taskDesc.isEmpty() && !title.contains(taskDesc)) {
+            title = title + "：" + taskDesc;
+        }
+        if (title.isEmpty()) {
+            title = firstNonEmpty(feed, "gameId", "cardId", "appId");
+        }
+        return title;
+    }
+
+    /** 按顺序取第一个非空字符串字段。 */
+    private static String firstNonEmpty(JSONObject jo, String... keys) {
+        for (String key : keys) {
+            String value = jo.optString(key, "").trim();
+            if (!value.isEmpty()) {
+                return value;
+            }
+        }
+        return "";
+    }
+
     
     /**
      * 查询玩乐豆小球列表，有则领取

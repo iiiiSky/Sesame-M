@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonMappingException;
 
 import lombok.Data;
 
+import io.github.aw1y2z.sesame.hook.Toast;
 import io.github.aw1y2z.sesame.data.task.ModelTask;
 import io.github.aw1y2z.sesame.model.task.antFarm.AntFarm;
 import io.github.aw1y2z.sesame.model.task.antForest.AntForestV2;
@@ -21,6 +22,20 @@ public class Status {
     private static final String TAG = Status.class.getSimpleName();
     
     public static final Status INSTANCE = new Status();
+
+    /**
+     * 保存失败是否已提示过：save() 每天会被调用几十次，持续失败时不该刷满日志与通知，
+     * 成功一次后复位（静态字段不进 Jackson，不落盘）
+     */
+    private static volatile boolean saveFailureNotified = false;
+
+    /**
+     * 内存里这份状态属于哪个 uid（静态字段不进 Jackson、不落盘）。
+     * <p>启动早期 uid 可能尚未就绪，此时 load() 读到的不是本账号的文件；若据此落盘，
+     * 会覆盖真实账号当天的 status.json。uid 与之一致前，读、写都必须先按当前 uid 重载，
+     * 见 {@link #ensureLoadedForCurrentUid()}。
+     */
+    private static volatile String loadedUid;
 
     /** 帮喂好友/家庭成员：当日总次数已达上限（服务端返回 resultCode=391），全局标记 */
     public static final String FLAG_FEED_FRIEND_ANIMAL_LIMIT = "farm::feedFriendAnimalLimit";
@@ -82,6 +97,8 @@ public class Status {
     private final Set<String> goldenBeansTaskReceivedSet = new HashSet<>();
     
     public static synchronized Boolean hasFlagToday(String tag) {
+        // 读也要先对齐归属，否则会拿「别的账号/空的状态」判断
+        ensureLoadedForCurrentUid();
         return INSTANCE.flagLogList.contains(tag);
     }
     
@@ -710,6 +727,20 @@ public class Status {
         }
     }
     
+    /**
+     * uid 与内存状态归属不一致（启动早期 uid 未就绪、切号）时，按当前 uid 重新加载。
+     * <p>读写两条路径都要过：只在 save() 里挡，挡不住用错状态做判断；只在 hasFlagToday()
+     * 里挡，挡不住把错状态写回真实账号。切号不丢内存标记——置位入口都即时落盘。
+     */
+    private static void ensureLoadedForCurrentUid() {
+        String currentUid = UserIdMap.getCurrentUid();
+        if (StringUtil.isEmpty(currentUid) || currentUid.equals(loadedUid)) {
+            return;
+        }
+        Log.system(TAG, "状态归属由[" + loadedUid + "]变为[" + currentUid + "]，按当前账号重新加载");
+        load();
+    }
+
     public static synchronized Status load() {
         String currentUid = UserIdMap.getCurrentUid();
         try {
@@ -717,6 +748,9 @@ public class Status {
                 Log.i(TAG, "用户为空，状态加载失败");
                 throw new RuntimeException("用户为空，状态加载失败");
             }
+            // 先声明归属再动文件：本方法内部会写文件，若该链路回调到 hasFlagToday()，
+            // loadedUid 未更新就会再进 load() 形成递归
+            loadedUid = currentUid;
             File statusFile = FileUtil.getStatusFile(currentUid);
             if (statusFile.exists()) {
                 String json = FileUtil.readFromFile(statusFile);
@@ -774,6 +808,8 @@ public class Status {
             Log.record("用户为空，状态保存失败");
             throw new RuntimeException("用户为空，状态保存失败");
         }
+        // 落盘前先对齐归属：uid 未就绪时内存可能是空状态，直接写会清掉真实账号当天的 status.json
+        ensureLoadedForCurrentUid();
         if (updateDay(nowCalendar)) {
             Log.system(TAG, "重置 status.json");
         }
@@ -781,14 +817,58 @@ public class Status {
             // 每次落盘都记一行会淹没有效日志（实测约 68 行/天），降为由「抓包记录」开关控制的调试日志
             Log.debug(TAG + ", 保存 status.json");
         }
-        long lastSaveTime = INSTANCE.saveTime;
+        // 注意：saveTime 不因失败回退。它同时是 updateDay()「是否跨天」的判据，回退会让同一天里
+        // 每次保存都重新判定跨天并 unload()，把当天已置的标记一并清掉，比丢掉一次落盘更糟。
+        INSTANCE.saveTime = System.currentTimeMillis();
+        boolean saved;
         try {
-            INSTANCE.saveTime = System.currentTimeMillis();
-            FileUtil.write2File(JsonUtil.toFormatJsonString(INSTANCE), FileUtil.getStatusFile(currentUid));
+            // write2File 内部把异常全吞了并只返回 boolean，原先丢弃返回值等于「写失败也算保存成功」
+            saved = FileUtil.write2File(JsonUtil.toFormatJsonString(INSTANCE), FileUtil.getStatusFile(currentUid));
         }
         catch (Exception e) {
-            INSTANCE.saveTime = lastSaveTime;
+            notifySaveFailure(currentUid, "序列化失败", e);
             throw e;
+        }
+        if (saved) {
+            if (saveFailureNotified) {
+                saveFailureNotified = false;
+                Log.system(TAG, "保存 status.json 恢复正常");
+            }
+        }
+        else {
+            notifySaveFailure(currentUid, "写入失败", null);
+        }
+    }
+
+    /**
+     * 落盘失败不再静默：内存里的标记保留（下一次 save 会整体补写，不会重复执行受标记守卫的动作），
+     * 但必须留下可归因的线索——否则「内存说做过、磁盘没记录」的状态只有进程重启才暴露。
+     */
+    private static void notifySaveFailure(String currentUid, String reason, Throwable error) {
+        if (saveFailureNotified) {
+            return;
+        }
+        saveFailureNotified = true;
+        String path = "未知路径";
+        boolean permissionToastShown = false;
+        try {
+            File statusFile = FileUtil.getStatusFile(currentUid);
+            path = statusFile.getAbsolutePath();
+            // 「已存在但不可写」这一情形 write2File 已自行 Toast，这里不重复弹
+            permissionToastShown = statusFile.exists() && !statusFile.canWrite();
+        } catch (Throwable ignored) {
+        }
+        Log.system(TAG, "保存 status.json " + reason + "，当日进度可能未被持久化: " + path);
+        if (error != null) {
+            Log.printStackTrace(TAG, error);
+        }
+        if (permissionToastShown) {
+            return;
+        }
+        try {
+            Toast.show("状态保存失败，当日进度可能丢失", true);
+        } catch (Throwable t) {
+            Log.debug("Toast 提示失败(状态保存失败): " + t);
         }
     }
     

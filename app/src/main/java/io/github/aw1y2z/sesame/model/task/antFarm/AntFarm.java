@@ -21,10 +21,14 @@ import io.github.aw1y2z.sesame.data.ModelGroup;
 import io.github.aw1y2z.sesame.data.TokenConfig;
 import io.github.aw1y2z.sesame.data.modelFieldExt.*;
 import io.github.aw1y2z.sesame.data.task.ModelTask;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy;
+import io.github.aw1y2z.sesame.data.task.TaskAward;
+import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy.Outcome;
 import io.github.aw1y2z.sesame.data.modelFieldExt.ChoiceModelField;
 import io.github.aw1y2z.sesame.entity.AlipayUser;
 import io.github.aw1y2z.sesame.entity.CustomOption;
 import io.github.aw1y2z.sesame.entity.FarmOrnaments;
+import io.github.aw1y2z.sesame.model.base.TaskAlternative;
 import io.github.aw1y2z.sesame.model.base.TaskCommon;
 import io.github.aw1y2z.sesame.model.extensions.ExtensionsHandle;
 import io.github.aw1y2z.sesame.model.normal.answerAI.AnswerAI;
@@ -61,6 +65,15 @@ public class AntFarm extends ModelTask {
      * <p>持久化 key，**不能改名**。
      */
     private static final String FLAG_COMPETITION_DONATE_TRIED = "antFarm::competitionDonateTried";
+
+    /**
+     * 小鸡乐园「刷任务」当日跳过标记：上报后服务端未刷新出新的宝箱次数时当天不再刷，
+     * 避免每轮运行都重发一次任务上报。持久化 key，**不能改名**。
+     */
+    private static final String FLAG_GAME_DRAW_TASK_SKIP = "antFarm::gameDrawTaskSkip";
+
+    /** 投喂被服务端拒绝的「饲料槽已满」结果码（按码判据，不认文案） */
+    private static final String CODE_FEED_TROUGH_FULL = "331";
     /** 小鸡所在空间标识：家庭空间。睡觉/起床靠它区分走家庭接口还是个人小屋接口 */
     private static final String SPACE_TYPE_CHICK_FAMILY = "ChickFamily";
 
@@ -82,6 +95,11 @@ public class AntFarm extends ModelTask {
      * 一轮里连着刷 3 次只是白刷（每轮开头重置，见 {@link #run()}）。
      */
     private boolean farmTaskAwardBusy = false;
+    /**
+     * 本轮投喂时服务端回了「饲料槽已满」(结果码见 CODE_FEED_TROUGH_FULL)：本轮不再投喂；
+     * 槽满后每 10 秒级的重试只是白打接口，每轮开头重置 (见 run())。
+     */
+    private boolean feedTroughFullThisRun = false;
     private double finalScore = 0d;
     private int foodInTrough = 0;
 
@@ -239,6 +257,7 @@ public class AntFarm extends ModelTask {
     public void run() {
         try {
             farmTaskAwardBusy = false;
+            feedTroughFullThisRun = false;
             if (enterFarm() == null) {
                 return;
             }
@@ -464,12 +483,9 @@ public class AntFarm extends ModelTask {
         try {
             //初始化AntFarmDoFarmTaskListMap
             AntFarmDoFarmTaskListMap.load();
-            Set<String> blackList = new HashSet<>();
-            blackList.add("到店付款");
-            blackList.add("线上支付");
-            blackList.add("逛闪购外卖1元起吃");
-            blackList.add("用花呗完成一笔支付");
-            Set<String> whiteList = new HashSet<>();// 从黑名单中移除该任务
+            // 预置黑名单登记在 MessageUtil（单一真相，配置页据此标注"默认"）
+            Set<String> blackList = MessageUtil.presetBlackList("AntFarm", "AntFarmDoFarmTaskList");
+            Set<String> whiteList = new HashSet<>();
             //whiteList.add("逛一逛树");
             for (String task : blackList) {
                 AntFarmDoFarmTaskListMap.add(task, task);
@@ -505,9 +521,7 @@ public class AntFarm extends ModelTask {
             AntFarmDrawMachineTaskListMap.load();
             // 注：游戏/开宝箱类不再预置拉黑，交由自动拉黑机制判定；
             // "伸出援手，点亮希望"（需真实捐赠）与"消耗饲料换机会"（需消耗资源）保留
-            blackList = new HashSet<>();
-            blackList.add("伸出援手，点亮希望");
-            blackList.add("消耗饲料换机会");
+            blackList = MessageUtil.presetBlackList("AntFarm", "AntFarmDrawMachineTaskList");
 
             whiteList = new HashSet<>();// 从黑名单中移除该任务
             //whiteList.add("逛一逛树");
@@ -1731,13 +1745,17 @@ public class AntFarm extends ModelTask {
         return false;
     }
 
-    private Boolean doVideoTask(String title) {
+    /**
+     * 行为伪造：取视频 → 上报播放 → 等 15 秒 → 触发完成。
+     * <p>结论按 {@link Outcome} 分类，交由 {@link TaskAttemptPolicy} 决定当天是否再试。
+     */
+    private Outcome doVideoTask(String title) {
         try {
             JSONObject jo = new JSONObject(AntFarmRpcCall.queryTabVideoUrl());
             if (!MessageUtil.checkMemo(TAG, jo)) {
                 //检查并标记黑名单任务
                 MessageUtil.checkResultCodeAndMarkTaskBlackList("AntFarmDoFarmTaskList", title, jo);
-                return false;
+                return retryableOrUnable(jo);
             }
             String videoUrl = jo.getString("videoUrl");
             String contentId = videoUrl.substring(videoUrl.indexOf("&contentId=") + 1, videoUrl.indexOf("&refer"));
@@ -1746,17 +1764,95 @@ public class AntFarm extends ModelTask {
                 TimeUtil.sleep(15100);
                 jo = new JSONObject(AntFarmRpcCall.videoTrigger(contentId));
                 if (jo.optBoolean("success")) {
-                    return true;
+                    return Outcome.DONE;
                 }
             }
             Log.record(jo.optString("resultMsg"));
             Log.i(jo.toString());
             //检查并标记黑名单任务
             MessageUtil.checkResultCodeAndMarkTaskBlackList("AntFarmDoFarmTaskList", title, jo);
+            return retryableOrUnable(jo);
         } catch (Throwable t) {
             Log.err(TAG, "doVideoTask err:", t);
         }
-        return false;
+        return Outcome.RETRY;
+    }
+
+    /** 临时故障（102/限流/异常）按可重试处理，其余按做不了 */
+    private Outcome retryableOrUnable(JSONObject jo) {
+        return MessageUtil.isRetryable(jo) || MessageUtil.isServerBusy(jo) ? Outcome.RETRY : Outcome.UNABLE;
+    }
+
+    /** 视频任务的普通完成尝试：饲料任务的通用申报接口对它无效，失败即交给行为伪造（doVideoTask）接手 */
+    private Outcome attemptVideoTask(String title, String bizKey) {
+        try {
+            JSONObject jo = new JSONObject(AntFarmRpcCall.doFarmTask(bizKey));
+            //检查并标记黑名单任务（此处是庄园饲料任务，应写入饲料黑名单而非抽抽乐）
+            MessageUtil.checkResultCodeAndMarkTaskBlackList("AntFarmDoFarmTaskList", title, jo);
+            if (MessageUtil.checkResultCode(TAG, jo)) {
+                return Outcome.DONE;
+            }
+            if (MessageUtil.isRetryable(jo) || MessageUtil.isServerBusy(jo)) {
+                return Outcome.RETRY;
+            }
+        } catch (Throwable t) {
+            Log.err(TAG, "attemptVideoTask err:", t);
+            return Outcome.RETRY;
+        }
+        return Outcome.UNSUPPORTED;
+    }
+
+    /** 饲料任务普通完成尝试：完成与否以任务列表为准（probeFarmStatus 复核），故此处只转译响应。 */
+    private Outcome attemptFarmTask(String title, String bizKey) {
+        try {
+            JSONObject jo = new JSONObject(AntFarmRpcCall.doFarmTask(bizKey));
+            //检查并标记黑名单任务（此处是庄园饲料任务，应写入饲料黑名单而非抽抽乐）
+            MessageUtil.checkResultCodeAndMarkTaskBlackList("AntFarmDoFarmTaskList", title, jo);
+            if (MessageUtil.checkResultCode(TAG, jo)) {
+                return Outcome.DONE;
+            }
+            if (MessageUtil.isRetryable(jo) || MessageUtil.isServerBusy(jo)) {
+                return Outcome.RETRY;
+            }
+            // 不支持rpc调用（400000040）→ 由 TaskAttemptPolicy 代为伪申报
+            if (TaskAlternative.hit(jo, "")) {
+                return Outcome.UNSUPPORTED;
+            }
+            return Outcome.UNABLE;
+        } catch (Throwable t) {
+            Log.err(TAG, "attemptFarmTask err:", t);
+        }
+        return Outcome.RETRY;
+    }
+
+    /** 列表状态探针：重拉庄园饲料任务列表，按 bizKey 匹配该任务当前状态。 */
+    private TaskAttemptPolicy.ProbeResult probeFarmStatus(String bizKey) {
+        try {
+            JSONObject jo = new JSONObject(AntFarmRpcCall.listFarmTask());
+            if (!MessageUtil.checkMemo(TAG, jo) || !jo.has("farmTaskList")) {
+                return TaskAttemptPolicy.ProbeResult.UNKNOWN;
+            }
+            JSONArray farmTaskList = jo.getJSONArray("farmTaskList");
+            for (int i = 0; i < farmTaskList.length(); i++) {
+                JSONObject t = farmTaskList.getJSONObject(i);
+                if (!bizKey.equals(t.optString("bizKey"))) {
+                    continue;
+                }
+                String status = t.optString("taskStatus");
+                if ("FINISHED".equals(status)) {
+                    return TaskAttemptPolicy.ProbeResult.FINISHED;
+                }
+                if ("RECEIVED".equals(status)) {
+                    return TaskAttemptPolicy.ProbeResult.RECEIVED;
+                }
+                return TaskAttemptPolicy.ProbeResult.TODO;
+            }
+            // 任务已从列表消失：视为已完成且已领
+            return TaskAttemptPolicy.ProbeResult.GONE;
+        } catch (Throwable t) {
+            Log.err(TAG, "probeFarmStatus err:", t);
+            return TaskAttemptPolicy.ProbeResult.UNKNOWN;
+        }
     }
 
     private Boolean doAnswerTask(String title) {
@@ -1824,6 +1920,11 @@ public class AntFarm extends ModelTask {
             String title = task.getString("title");
             String bizKey = task.getString("bizKey");
             String taskId = task.optString("taskId");
+            // 诊断：多阶段游戏任务的 bizKey 仅在运行时由服务端下发，App 未写死中文名，
+            // 单独打印 title 便于定位具体是哪个小游戏（命中 1009 风控前也能看到）
+            if (bizKey.contains("multistage_gametask")) {
+                Log.record("庄园多阶段游戏任务🎮[" + title + "]#bizKey=" + bizKey);
+            }
             if (bizKey.contains("HEART_DONAT") || bizKey.equals("BAIDUJS_202512") || bizKey.equals("BABAFARM_TB")) {
                 return false;
             }
@@ -1832,20 +1933,25 @@ public class AntFarm extends ModelTask {
             // 注意视频任务的标题实际是「看庄园小视频」——原先写的是 equals("庄园小视频")，
             // 少一个"看"字，导致这两类任务**从来没有走对过接口**（一直落到通用 doFarmTask 分支）
             if ("VIDEO_TASK".equals(taskId)) {
-                isDoTask = doVideoTask(title);
+                // 视频任务：普通申报接口做不了，必须把"观看行为"伪造出来（见 doVideoTask）。
+                // 完成判定以任务列表为准（探针复核），响应不可信。
+                // 由 TaskAttemptPolicy 管节流与失败分类：同一天同一任务只伪造一次，失败不再每轮白等 15 秒
+                Outcome outcome = TaskAttemptPolicy.handle("farm::video::" + title, title, null,
+                        () -> attemptVideoTask(title, bizKey), Log::farm,
+                        new TaskAttemptPolicy.Site("AntFarmDoFarmTaskList", "庄园饲料任务", bizKey, "",
+                                TaskAlternative.DEFAULT_VERSION,
+                                () -> doVideoTask(title) == Outcome.DONE,
+                                (k) -> probeFarmStatus(bizKey)));
+                isDoTask = outcome == Outcome.DONE || outcome == Outcome.TRIGGERED;
             } else if ("ANSWER".equals(taskId)) {
                 isDoTask = doAnswerTask(title);
             } else {
-                JSONObject jodoFarmTask = new JSONObject(AntFarmRpcCall.doFarmTask(bizKey));
-                //检查并标记黑名单任务（此处是庄园饲料任务，应写入饲料黑名单而非抽抽乐）
-                MessageUtil.checkResultCodeAndMarkTaskBlackList("AntFarmDoFarmTaskList", title, jodoFarmTask);
-                if (MessageUtil.checkResultCode(TAG, jodoFarmTask)) {
-                    isDoTask=true;
-                } else {
-                    // 留痕：标题被服务端改得完全不像时会落到这里（并可能被自动拉黑），
-                    // 日志里的 bizKey/taskId 用于后续把分派改成稳定字段
-                    Log.farm("饲料任务⚠️未完成[" + title + "]#bizKey=" + bizKey + "#taskId=" + task.optString("taskId"));
-                }
+                // 完成判定以任务列表为准，不以 doFarmTask 响应为准（见 TaskAttemptPolicy）
+                Outcome outcome = TaskAttemptPolicy.handle("farm::task::" + bizKey, title, null,
+                        () -> attemptFarmTask(title, bizKey), Log::farm,
+                        new TaskAttemptPolicy.Site("AntFarmDoFarmTaskList", "庄园饲料任务", bizKey, "",
+                                (k) -> probeFarmStatus(bizKey)));
+                isDoTask = outcome == Outcome.DONE || outcome == Outcome.TRIGGERED;
             }
 
             if (isDoTask) {
@@ -1873,14 +1979,20 @@ public class AntFarm extends ModelTask {
             }
             JSONObject jo = new JSONObject(AntFarmRpcCall.receiveFarmTaskAward(taskId));
             if (!MessageUtil.checkMemo(TAG, jo)) {
+                // 领奖收口：先按任务列表复核"已领到"，未确认才交自动拉黑（顺序由 TaskAward 固定）
+                if (TaskAward.confirmReceivedOrBlackList("饲料领取🎖️任务",
+                        k -> probeFarmStatus(task.optString("bizKey")), task.optString("bizKey"),
+                        task.optString("title", ""),
+                        () -> MessageUtil.checkResultCodeAndMarkTaskBlackList("AntFarmDoFarmTaskList",
+                                task.optString("title", ""), jo),
+                        msg -> Log.farm(msg))) {
+                    return true;
+                }
                 // 服务端繁忙(102)：本轮不再继续领其余任务，避免整轮反复白刷（请求本身已经发出过）
                 if (MessageUtil.isServerBusy(jo) && !farmTaskAwardBusy) {
                     farmTaskAwardBusy = true;
                     Log.record("服务端繁忙🌧️本轮跳过剩余饲料任务领取");
-                    return false;
                 }
-                //检查并标记黑名单任务
-                MessageUtil.checkResultCodeAndMarkTaskBlackList("AntFarmDoFarmTaskList", task.optString("title", ""), jo);
                 return false;
             }
             if (awardType.equals("ALLPURPOSE")) {
@@ -1904,6 +2016,9 @@ public class AntFarm extends ModelTask {
     }
 
     private void feedAnimal(String farmId) {
+        if (feedTroughFullThisRun) {
+            return;
+        }
         try {
             syncAnimalStatus(ownerFarmId);
             if (foodStock < 180) {
@@ -1911,7 +2026,14 @@ public class AntFarm extends ModelTask {
                 return;
             }
             JSONObject jo = new JSONObject(AntFarmRpcCall.feedAnimal(farmId));
-            if (MessageUtil.checkMemo(TAG, jo)) {
+            boolean ok = MessageUtil.checkMemo(TAG, jo);
+            if (!ok && CODE_FEED_TROUGH_FULL.equals(jo.optString("resultCode"))) {
+                // 服务端回读：饲料槽已满，本轮不再投喂 (下一轮再看)
+                feedTroughFullThisRun = true;
+                Log.record("投喂小鸡⏭️饲料槽已满，本轮不再投喂");
+                return;
+            }
+            if (ok) {
                 int feedFood = foodStock - jo.getInt("foodStock");
                 add2FoodStock(-feedFood);
                 Log.farm("投喂小鸡🥣消耗[" + feedFood + "g]#剩余[" + foodStock + "g饲料]");
@@ -2672,7 +2794,11 @@ public class AntFarm extends ModelTask {
 
     private void gameCenterBuyMallItem() {
         try {
-            getAllSkuInfo();
+            // 清单当日拉一次即可：一次商城首页 + 每个 SPU 一次详情，且它同时是配置页兑奖选项的来源，
+            // 不能完全不拉；拉不到 SKU 就不打标记，留给下一轮重试
+            if (!Status.hasFlagToday("farm::mallSkuList") && getAllSkuInfo()) {
+                Status.flagToday("farm::mallSkuList");
+            }
             Map<String, Integer> buyList = gameCenterBuyMallItemList.getValue();
             for (Map.Entry<String, Integer> entry : buyList.entrySet()) {
                 String skuId = entry.getKey();
@@ -2704,19 +2830,26 @@ public class AntFarm extends ModelTask {
         return mallItemSimpleList;
     }
 
-    // 获取乐园商店所有商品信息
-    private void getAllSkuInfo() {
+    /**
+     * 获取乐园商店所有商品信息。
+     *
+     * @return 是否真的取到 SKU（调用方据此决定要不要打当日标记，取不到时留给下一轮重试）
+     */
+    private boolean getAllSkuInfo() {
         try {
+            int before = skuInfo.size();
             JSONArray mallItemSimpleList = getGameCenterMallItemList("ANTFARM_GAME_CENTER");
             if (mallItemSimpleList == null) {
-                return;
+                return false;
             }
             for (int i = 0; i < mallItemSimpleList.length(); i++) {
                 JSONObject itemInfoVO = mallItemSimpleList.getJSONObject(i);
                 getSkuInfoByItemInfoVO(itemInfoVO);
             }
+            return skuInfo.size() > before;
         } catch (Throwable th) {
             Log.err(TAG, "getAllSkuInfo err:", th);
+            return false;
         }
     }
 
@@ -2978,10 +3111,20 @@ public class AntFarm extends ModelTask {
                     // 不再按 title/desc 关键字分派：服务端文案一改就会整类任务不执行（列表拿到了却没有任何动作），
                     // 这里改为全部尝试，确实做不了的交给自动拉黑机制剔除
                     if (!matched) {
+                        String bizKey = jo.optString("bizKey");
+                        // 交易/履约类：finishTask 与 doFarmTask 都会被服务端判风险，直接不申报并交自动黑名单
+                        // （本路径不经 TaskAttemptPolicy.handle，拉黑只能在这里做）
+                        if (TaskAlternative.isTransactionTask(bizKey)) {
+                            // 底线：交易/支付类一次即永久拉黑，绝不伪造
+                            MessageUtil.MarkTaskBlackListPermanent("AntFarm", "AntFarmDrawMachineTaskList",
+                                    "庄园装扮抽抽乐任务", title);
+                            todoSkipped++;
+                            Log.farm("抽抽乐⏭️交易/履约类[" + title + "]#不申报，已永久拉黑");
+                            continue;
+                        }
                         // 服务端偶发返回 limit==times 的 TODO 任务，此时仍尝试一次，避免有任务却整轮不执行
                         int tryTimes = remain > 0 ? remain : 1;
                         String via = null;
-                        String bizKey = jo.optString("bizKey");
                         for (int j = 0; j < tryTimes; j++) {
                             JSONObject jofinishTask = new JSONObject(AntFarmRpcCall.finishTask(taskId, taskSceneCode));
                             if (MessageUtil.checkSuccess(TAG, jofinishTask)) {
@@ -3392,7 +3535,27 @@ public class AntFarm extends ModelTask {
                     int remainToTask = limit - used;
                     // 已开数量 < 上限 且 无可用次数 → 触发任务刷取
                     if (remainToTask > 0 && quotaCanUse == 0) {
-                        GameTask.Farm_ddply.report("庄园", remainToTask);
+                        if (!Status.hasFlagToday(FLAG_GAME_DRAW_TASK_SKIP)) {
+                            // 本地 quotaCanUse/used 已被本次开箱流程改过，不能当基线，先回读一次真实值
+                            JSONObject beforeJo = new JSONObject(AntFarmRpcCall.queryGameList());
+                            JSONObject beforeRights = beforeJo.optJSONObject("gameCenterDrawRights");
+                            int beforeUsed = beforeRights != null ? beforeRights.optInt("usedQuota", used) : used;
+                            int beforeQuota = beforeRights != null ? beforeRights.optInt("quotaCanUse", quotaCanUse) : quotaCanUse;
+                            // report 是异步线程，上报完立刻回读会读到旧状态，这里用同步版
+                            int successes = GameTask.Farm_ddply.reportSync("庄园", remainToTask);
+                            if (successes > 0) {
+                                JSONObject afterJo = new JSONObject(AntFarmRpcCall.queryGameList());
+                                JSONObject afterRights = afterJo.optJSONObject("gameCenterDrawRights");
+                                int afterQuota = afterRights != null ? afterRights.optInt("quotaCanUse", beforeQuota) : beforeQuota;
+                                int afterUsed = afterRights != null ? afterRights.optInt("usedQuota", beforeUsed) : beforeUsed;
+                                if (afterQuota > beforeQuota || afterUsed > beforeUsed) {
+                                    Log.record("小鸡乐园🎁刷任务生效#可用次数[" + beforeQuota + "→" + afterQuota + "]");
+                                } else {
+                                    Status.flagToday(FLAG_GAME_DRAW_TASK_SKIP);
+                                    Log.record("小鸡乐园🎁刷任务未推进#今日不再刷任务");
+                                }
+                            }
+                        }
                     } else if (remainToTask <= 0) {
                         Log.record("今日 " + limit + " 个金蛋任务已全部满额");
                     }

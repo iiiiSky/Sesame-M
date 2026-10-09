@@ -36,3 +36,25 @@ jobs:
             git merge --abort
             exit 1
           fi
+
+      - name: Create release following upstream tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          UP_REPO="aw1y2z/Sesame-M"
+          FORK_REPO="iiiiSky/Sesame-M"
+          UP_TAG=$(gh api "repos/$UP_REPO/releases" --jq '[.[] | select(.draft==false)][0].tag_name')
+          echo "上游最新 release tag: $UP_TAG"
+          if gh api "repos/$FORK_REPO/git/refs/tags/$UP_TAG" >/dev/null 2>&1; then
+            echo "::notice::fork 已存在 tag $UP_TAG，跳过创建"
+          else
+            HEAD=$(git rev-parse HEAD)
+            gh api "repos/$FORK_REPO/git/refs" \
+              -f ref="refs/tags/$UP_TAG" -f sha="$HEAD" >/dev/null
+            gh api "repos/$FORK_REPO/releases" \
+              -f tag_name="$UP_TAG" -f name="$UP_TAG" \
+              -F draft=false -F prerelease=false \
+              -f body="> 自动同步上游 $UP_REPO 后发布的 $UP_TAG" >/dev/null
+            echo "::notice::已创建 release $UP_TAG"
+          fi

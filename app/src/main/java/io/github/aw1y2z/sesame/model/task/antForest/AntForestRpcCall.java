@@ -156,6 +156,21 @@ public class AntForestRpcCall {
         return ApplicationHook.requestString("com.alipay.antieprights.batchQueryAndTouchopengreen", args);
     }*/
 
+    /**
+     * 能量收支明细分页查询——覆盖全部能量来源，口径与客户端「能量统计」界面一致。
+     * <p>{@code recordVOList} 每条含 {@code bizDate}(毫秒时间戳)、{@code bizType}、{@code energy}。
+     * <p>分页靠 {@code nextId} 游标（值即"下一页起始时间戳"，首请求传 0 从最新一条开始），
+     * 翻到 {@code hasMore=false} 为止。
+     *
+     * @param nextId   游标：0 表示从最新开始，否则传上一页响应中的 nextId
+     * @param pageSize 每页条数
+     */
+    public static String pagingQueryEnergyRecord(long nextId, int pageSize) {
+        String args = "[{\"nextId\":" + nextId + ",\"pageSize\":" + pageSize
+                + ",\"source\":\"monopoly\",\"version\":\"20220926\"}]";
+        return ApplicationHook.requestString("alipay.antmember.forest.h5.pagingQueryEnergyRecord", args);
+    }
+
     public static String listTaskopengreen() {
         String args = "[{\"extend\":{\"businessSource\":\"ANTFOREST-home_task_list\",\"osType\":\"android\",\"version\":\"20260109\"},\"requestType\":\"RPC\",\"sceneCode\":\"ANTFOREST_VITALITY_TASK\",\"source\":\"chInfo_ch_appcenter__chsub_9patch\"}]";
         return ApplicationHook.requestString("com.alipay.antieptask.listTaskopengreen", args);
@@ -703,12 +718,6 @@ public class AntForestRpcCall {
      * 森林抽抽乐-活动列表
      */
     public static String enterDrawActivityopengreen(String activityId, String sceneCode, String source) {
-        //JSONObject params = new JSONObject();
-        //params.put("activityId", "2025060301");
-        //params.put("requestType", "RPC");
-        //params.put("sceneCode", "ANTFOREST_NORMAL_DRAW");
-        //params.put("source", source);
-        //String args = "[" + params + "]";
         String requestData = "[{\"activityId\":\"" + activityId + "\",\"requestType\":\"RPC\",\"sceneCode\":\"" + sceneCode + "\"," + "\"source\":\"" + source + "\"}]";
         return ApplicationHook.requestString("com.alipay.antiepdrawprod.enterDrawActivityopengreen", requestData);
     }
@@ -718,11 +727,6 @@ public class AntForestRpcCall {
      */
     public static String listTaskopengreen(String sceneCode, String source) {
         //        [{"requestType":"RPC","sceneCode":"ANTFOREST_NORMAL_DRAW_TASK","source":"task_entry"}]
-        //JSONObject params = new JSONObject();
-        //params.put("requestType", "RPC");
-        //params.put("sceneCode", sceneCode);
-        //params.put("source", source);
-        //String args = "[" + params + "]";
         String requestData = "[{\"requestType\":\"RPC\",\"sceneCode\":\"" + sceneCode + "\",\"source\":\"" + source + "\"}]";
         return ApplicationHook.requestString("com.alipay.antieptask.listTaskopengreen", requestData);
     }
@@ -731,13 +735,6 @@ public class AntForestRpcCall {
      * 森林抽抽乐-签到领取次数-访问即算签到，所以直接领取？？
      */
     public static String receiveTaskAwardopengreen(String source, String sceneCode, String taskType) {
-        //JSONObject params = new JSONObject();
-        //params.put("ignoreLimit", true);
-        //params.put("requestType", "RPC");
-        //params.put("sceneCode", sceneCode);
-        //params.put("source", source);
-        //params.put("taskType", taskType);
-        //String args = "[" + params + "]";
         String requestData = "[{\"ignoreLimit\":true,\"requestType\":\"RPC\",\"sceneCode\":\"" + sceneCode + "\"," + "\"source\":\"" + source + "\",\"taskType\":\"" + taskType + "\"}]";
         return ApplicationHook.requestString("com.alipay.antieptask.receiveTaskAwardopengreen", requestData);
     }

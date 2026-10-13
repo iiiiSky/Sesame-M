@@ -55,7 +55,7 @@ public abstract class BaseCaptchaHandler {
         try {
             return handleSlideCaptcha(activity);
         } catch (Exception e) {
-            Log.record("滑动验证🆘处理验证码页面时发生异常: " + e);
+            Log.record("滑动验证⚠️处理验证码页面时发生异常: " + e);
             return false;
         }
     }
@@ -68,21 +68,20 @@ public abstract class BaseCaptchaHandler {
         try {
             SimpleViewImage slideTextInDialog = findSlideTextInDialog();
             if (slideTextInDialog == null) {
-                // Log.captcha(TAG, "未找到滑动验证文本，跳过处理");
                 return false; // 未找到关键视图，返回 false 让其他处理器尝试
             }
-            Log.record("滑动验证🆘发现滑动验证文本:" + slideTextInDialog.getText()+"");
+            Log.record("滑动验证⚠️发现滑动验证文本:" + slideTextInDialog.getText()+"");
             try {
                 Thread.sleep(500L); // 等待界面稳定
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                Log.record("滑动验证🆘等待界面稳定时被中断: " + e);
+                Log.record("滑动验证⚠️等待界面稳定时被中断: " + e);
                 return false;
             }
             // 执行滑动验证
             return performSlideAndVerify(activity, slideTextInDialog);
         } catch (Exception e) {
-            Log.record("滑动验证🆘处理滑动验证码时发生错误: " + e);
+            Log.record("滑动验证⚠️处理滑动验证码时发生错误: " + e);
             return false;
         } finally {
             captchaProcessingMutex.unlock();
@@ -98,14 +97,14 @@ public abstract class BaseCaptchaHandler {
     private boolean performSlideAndVerify(Activity activity, SimpleViewImage slideTextView) {
         View sliderView = ViewHierarchyAnalyzer.findActualSliderView(slideTextView);
         if (sliderView == null) {
-            Log.record("滑动验证🆘未能找到可操作的滑块视图，滑动无法执行。");
+            Log.record("滑动验证⚠️未能找到可操作的滑块视图，滑动无法执行。");
             return false;
         }
         
         // 计算滑动坐标
         SlideCoordinates coordinates = calculateSlideCoordinates(activity, sliderView);
         if (coordinates == null) {
-            Log.record("滑动验证🆘计算滑动坐标失败，滑动无法执行。");
+            Log.record("滑动验证⚠️计算滑动坐标失败，滑动无法执行。");
             return false;
         }
         
@@ -131,15 +130,13 @@ public abstract class BaseCaptchaHandler {
             Thread.sleep(slideDuration + POST_SLIDE_CHECK_DELAY_MS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            Log.record("滑动验证🆘滑动后等待检查时被中断:" + e);
+            Log.record("滑动验证⚠️滑动后等待检查时被中断:" + e);
             return false;
         }
         
         if (checkCaptchaTextGone()) {
-            //Log.record("滑动验证🆘验证码文本已消失，滑动成功。");
             return true;
         } else {
-            //Log.record("滑动验证🆘验证码文本仍然存在，滑动可能失败。");
             return false;
         }
     }
@@ -155,7 +152,6 @@ public abstract class BaseCaptchaHandler {
         // 获取滑动区域的整体容器（滑块的父容器）
         ViewGroup slideContainer = (sliderView.getParent() instanceof ViewGroup) ? (ViewGroup) sliderView.getParent() : null;
         if (slideContainer == null) {
-            // Log.captcha(TAG, "未能找到滑块容器");
             return null;
         }
         
@@ -198,7 +194,7 @@ public abstract class BaseCaptchaHandler {
         // 确保滑动终点不超过屏幕边界
         if (endX > maxEndX) {
             endX = maxEndX;
-            Log.record("滑动验证🆘调整滑动终点以适配屏幕边界");
+            Log.record("滑动验证⚠️调整滑动终点以适配屏幕边界");
         }
         
         // 确保滑动距离足够（至少滑块宽度的1.5倍）
@@ -207,18 +203,16 @@ public abstract class BaseCaptchaHandler {
         if (actualSlideDistance < minSlideDistance) {
             int minDistanceOffset = random.nextInt(7) - 3; // -3 到 3
             endX = startX + minSlideDistance + minDistanceOffset;
-            //Log.record("滑动验证🆘调整滑动距离至最小要求:" + minSlideDistance + "px");
         }
         
         float endY = startY; // 保持水平滑动
         /*
         // 输出详细的调试信息
-        Log.record("屏幕信息🆘尺寸=" + screenWidth + "x" + screenHeight);
+        Log.record("屏幕信息⚠️尺寸=" + screenWidth + "x" + screenHeight);
         Log.record("滑动区域信息: 容器位置=[" + containerX + "," + containerY + "], 尺寸=" + containerWidth + "x" + containerHeight);
         Log.record("滑块信息: 位置=[" + sliderX + "," + sliderY + "], 尺寸=" + sliderWidth + "x" + sliderHeight);
         Log.record("计算结果: 起点=[" + startX + "," + startY + "], 终点=[" + endX + "," + endY + "], 滑动距离=" + (endX - startX) + "px");
         */
-        //Log.record("滑动验证🆘屏幕信息:尺寸=" + screenWidth + "x" + screenHeight + ";" + "滑动区域信息:容器位置=[" + containerX + "," + containerY + "],尺寸=" + containerWidth + "x" + containerHeight + ";" + "滑块信息:位置=[" + sliderX + "," + sliderY + "],尺寸=" + sliderWidth + "x" + sliderHeight + ";" + "计算结果:起点=[" + startX + "," + startY + "],终点=[" + endX + "," + endY + "],滑动距离=" + (endX - startX) + "px.");
         // 说明：这里原先把坐标拼成 "input swipe ..." 命令交给（已注释掉的）广播去执行，
         // 但该命令从未被使用——真正的手势由 MotionEventSimulator 在主线程派发。死代码，已删。
         return new SlideCoordinates(startX, startY, endX, endY);
@@ -231,10 +225,8 @@ public abstract class BaseCaptchaHandler {
     private boolean checkCaptchaTextGone() {
         SimpleViewImage slideTextInDialog = findSlideTextInDialog();
         if (slideTextInDialog == null) {
-            //Log.record("滑动验证🆘验证码文本已消失(在对话框中未找到)。");
             return true;
         } else {
-            //Log.record("滑动验证🆘验证码文本仍然存在(在对话框中找到)。");
             return false;
         }
     }
@@ -245,10 +237,9 @@ public abstract class BaseCaptchaHandler {
      */
     private SimpleViewImage findSlideTextInDialog() {
         try {
-            // Log.captcha(TAG, "尝试通过 XPath 查找滑动验证文本: " + SLIDE_VERIFY_TEXT_XPATH);
             return SimplePageManager.tryGetTopView(SLIDE_VERIFY_TEXT_XPATH);
         } catch (Exception e) {
-            Log.record("滑动验证🆘由于异常导致查找验证码文本失败:"+e);
+            Log.record("滑动验证⚠️由于异常导致查找验证码文本失败:"+e);
             return null;
         }
     }

@@ -116,7 +116,6 @@ public class GreenFinance extends ModelTask {
         //捐助
         donation();
         //评级奖品（CP14664674 已结束，暂时注释）
-        // prizes();
         //绿色经营
         GreenFinanceRpcCall.doTask("AP13159535", TAG, "绿色经营📊");
         TimeUtil.sleep(500);
@@ -133,7 +132,7 @@ public class GreenFinance extends ModelTask {
             JSONObject joSelfCollect = new JSONObject(s);
             if (joSelfCollect.optBoolean("success")) {
                 int totalCollectPoint = joSelfCollect.getJSONObject("result").getInt("totalCollectPoint");
-                Log.other("绿色经营📊收集获得" + totalCollectPoint);
+                Log.other("绿色经营📊[收集]#获得" + totalCollectPoint);
             } else {
                 Log.i(TAG + ".batchSelfCollect", joSelfCollect.optString("resultDesc"));
             }
@@ -252,7 +251,6 @@ public class GreenFinance extends ModelTask {
                     break;
                 }
                 Log.other("绿色经营📊[" + jsonObject.getString("title") + "]打卡成功");
-//                Thread.sleep(executeIntervalInt);
             }
             // 回读确认：服务端返回的行为项全部为 Y（今日已打卡）才落当日标记
             JSONObject verified = new JSONObject(GreenFinanceRpcCall.queryUserTickItem(type));
@@ -423,12 +421,12 @@ public class GreenFinance extends ModelTask {
                     TimeUtil.sleep(1500);
                     JSONObject jsonObject = new JSONObject(str);
                     if (!jsonObject.optBoolean("success")) {
-                        Log.other("绿色经营🙋，好友金币巡查失败");
+                        Log.other("绿色经营🙋[金币巡查]#失败");
                         break;
                     }
                     JSONObject result = jsonObject.getJSONObject("result");
                     if (result.getBoolean("lastPage")) {
-                        Log.other("绿色经营🙋，好友金币巡查完成");
+                        Log.other("绿色经营🙋[金币巡查]#完成");
                         Status.greenFinancePointFriend();
                         return;
                     }

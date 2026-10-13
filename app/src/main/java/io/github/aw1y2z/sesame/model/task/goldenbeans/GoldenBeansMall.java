@@ -38,12 +38,11 @@ public final class GoldenBeansMall {
                 return false;
             }
             int added = syncCatalogue(items);
+            // 兑换关闭 / 未勾选权益都是用户配置的稳定状态，每轮相同；静默（列表已同步，供配置页勾选）
             if (!exchangeEnabled) {
-                Log.goldenBeans("金豆商城🛒兑换已关闭#仅更新可兑列表[新增" + added + "]");
                 return true;
             }
             if (selected == null || selected.isEmpty()) {
-                Log.goldenBeans("金豆商城🛒未选择要兑换的权益#本轮只同步列表");
                 return true;
             }
             int exchanged = 0;
@@ -79,7 +78,7 @@ public final class GoldenBeansMall {
         }
         JSONArray itemList = jo.optJSONArray("itemInfoVOList");
         if (itemList == null) {
-            Log.goldenBeans("金豆商城⚠️商品列表结构异常#无 itemInfoVOList");
+            Log.goldenBeans("金豆商城⚠️商品列表结构异常");
             return null;
         }
         JSONArray result = new JSONArray();

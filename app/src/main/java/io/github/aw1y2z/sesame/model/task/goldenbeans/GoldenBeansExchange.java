@@ -35,7 +35,7 @@ public final class GoldenBeansExchange {
             }
             JSONObject info = indexJo.optJSONObject("manureExchangeInfo");
             if (info == null) {
-                Log.goldenBeans("金豆换豆⚠️响应缺少manureExchangeInfo");
+                Log.goldenBeans("金豆换豆⚠️响应缺少兑换信息");
                 return;
             }
             boolean farmOpened = info.optBoolean("farmOpened", false);
@@ -84,7 +84,7 @@ public final class GoldenBeansExchange {
             }
             int beanDelta = exchangeResponse.optInt("beanDelta", 0);
             if (beanDelta <= 0) {
-                Log.goldenBeans("金豆换豆⚠️响应缺少有效beanDelta#不记录额度");
+                Log.goldenBeans("金豆换豆⚠️响应缺少有效到账信息#不记录额度");
                 return;
             }
             Log.goldenBeans("金豆换豆🌱请求[" + reserved + "豆]消耗["
@@ -113,7 +113,7 @@ public final class GoldenBeansExchange {
             }
             JSONObject info = indexJo.optJSONObject("manureExchangeInfo");
             if (info == null) {
-                Log.goldenBeans("金豆芝麻粒换豆⚠️响应缺少manureExchangeInfo");
+                Log.goldenBeans("金豆芝麻粒换豆⚠️响应缺少兑换信息");
                 return;
             }
             boolean pageOpened = info.optBoolean("pageOpened", false);
@@ -131,12 +131,8 @@ public final class GoldenBeansExchange {
                     ? Math.max(dailyBeanLimit - exchangedToday, 0) : Long.MAX_VALUE;
             long available = Math.max(Math.min(serverLimit, userRemaining), 0);
 
-            Log.goldenBeans("金豆芝麻粒换豆资格🔍页面[" + pageOpened + "]芝麻粒[" + currentManure
-                    + "]可换芝麻粒[" + effectiveExchangeManure + "]单粒换豆[" + beanReward
-                    + "]最低兑换[" + minExchangeAmount + "]剩余额度[" + remainQuota
-                    + "]单日上限[" + (dailyBeanLimit > 0 ? String.valueOf(dailyBeanLimit) : "不限")
-                    + "]今日已换[" + exchangedToday + "]可兑换[" + available + "]");
-
+            // 资格快照（芝麻粒/额度/单日上限等）每轮恒定，属诊断数据；不单独打，
+            // 真正兑换成功时才由下方「金豆芝麻粒换豆🎖️…」报告结果
             if (!pageOpened || beanReward <= 0 || minExchangeAmount <= 0) {
                 Log.record("金豆芝麻粒换豆⏸️服务端资格未满足#跳过");
                 return;
@@ -157,7 +153,7 @@ public final class GoldenBeansExchange {
             }
             int beanDelta = exchangeResponse.optInt("beanDelta", 0);
             if (beanDelta <= 0) {
-                Log.goldenBeans("金豆芝麻粒换豆⚠️响应缺少有效beanDelta#不记录额度");
+                Log.goldenBeans("金豆芝麻粒换豆⚠️响应缺少有效到账信息#不记录额度");
                 return;
             }
             // 豆已换出：先记当日额度再回查。原先放在回查之后，回查失败即不记额度 → 会重复换豆/超单日上限

@@ -97,7 +97,6 @@ public enum GameTask {
             bodyJson.put("version", version);
             String body = bodyJson.toString();
 
-            //Log.other("login 请求体 -> " + body);
 
             // 建立HTTP连接
             URL url = new URL("https://gamesapi2.aslk2018.com/v2/game/login");
@@ -133,7 +132,6 @@ public enum GameTask {
                 conn.disconnect();
             }
 
-            //Log.other("login 响应 -> HTTP " + respCode + " " + responseText);
 
             // 解析响应JSON
             JSONObject resJson = new JSONObject(responseText.toString());
@@ -145,7 +143,7 @@ public enum GameTask {
                     return this.cachedToken;
                 }
             } else {
-                Log.error("登录接口❌报错(Code" + respCode + "):" + responseText);
+                Log.error("登录接口⚠️报错(Code" + respCode + "):" + responseText);
             }
         } catch (Exception e) {
             Log.error("登录过程🚨抛出异常:" + e.getMessage());
@@ -162,7 +160,7 @@ public enum GameTask {
         final String reportUid = UserIdMap.getCurrentUid();
         new Thread(() -> {
             if (!java.util.Objects.equals(reportUid, UserIdMap.getCurrentUid())) {
-                Log.record("任务流程🛑账号已切换，停止上报");
+                Log.record("任务流程⚠️账号已切换，停止上报");
                 return;
             }
             this.cachedToken = login();
@@ -174,7 +172,7 @@ public enum GameTask {
             Log.record("开始执行🚀"+gameType+"游戏任务:目标" + eggCount + "个蛋，需请求" + totalNeeded + "次");
             for (int i = 1; i <= totalNeeded; i++) {
                 if (!java.util.Objects.equals(reportUid, UserIdMap.getCurrentUid())) {
-                    Log.record("任务流程🛑账号已切换，停止上报");
+                    Log.record("任务流程⚠️账号已切换，停止上报");
                     break;
                 }
                 if (!executeSingleReport(gameType,i, totalNeeded)) {
@@ -269,8 +267,6 @@ public enum GameTask {
                     channelOverride != null && !channelOverride.isEmpty() ? channelOverride : channel);
             String body = bodyJson.toString();
 
-            //Log.other("taskReport 请求体 -> " + body);
-
             // 建立HTTP连接
             URL url = new URL("https://gamesapi2.aslk2018.com/v2/zfb/taskReport");
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
@@ -306,8 +302,6 @@ public enum GameTask {
                 // HttpURLConnection 没有 close()，异常路径也必须 disconnect 才能释放连接
                 conn.disconnect();
             }
-
-            //Log.other("taskReport 响应 -> HTTP " + respCode + " " + responseText);
 
             // 解析响应
             JSONObject resJson = new JSONObject(responseText.toString());

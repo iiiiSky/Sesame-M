@@ -72,8 +72,6 @@ jobs:
           FORK_REPO="iiiiSky/Sesame-M"
           UP_TAG="${{ steps.create_release.outputs.up_tag }}"
           echo "为 tag $UP_TAG 触发 Android CI 构建 APK..."
-          gh api -X POST "repos/$FORK_REPO/actions/workflows/release.yml/dispatches" \
-            --input - <<EOF
-        {"ref":"MIUIX-api102","inputs":{"tag":"$UP_TAG"}}
-      EOF
+          printf '{"ref":"MIUIX-api102","inputs":{"tag":"%s"}}' "$UP_TAG" | \
+            gh api -X POST "repos/$FORK_REPO/actions/workflows/release.yml/dispatches" --input -
           echo "::notice::已触发 Android CI 构建 $UP_TAG"

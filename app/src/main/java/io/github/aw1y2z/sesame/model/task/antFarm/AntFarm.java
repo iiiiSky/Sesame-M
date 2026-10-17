@@ -5,7 +5,6 @@ import android.os.Build;
 import io.github.aw1y2z.sesame.entity.AlipayAntFarmDoFarmTaskList;
 import io.github.aw1y2z.sesame.entity.AlipayAntFarmDrawMachineTaskList;
 import io.github.aw1y2z.sesame.entity.GameCenterMallItem;
-import io.github.aw1y2z.sesame.model.task.antForest.AntForestRpcCall;
 import io.github.aw1y2z.sesame.model.task.antGame.GameTask;
 import io.github.aw1y2z.sesame.util.idMap.AntFarmDoFarmTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntFarmDrawMachineTaskListMap;
@@ -297,35 +296,46 @@ public class AntFarm extends ModelTask {
                 } else {
                     syncAnimalStatusAtOtherFarm(ownerAnimal.currentFarmId);
                     boolean guest = false;
-                    switch (SubAnimalType.valueOf(ownerAnimal.subAnimalType)) {
-                        case GUEST:
-                            guest = true;
-                            Log.record("小鸡到好友家去做客了");
-                            break;
-                        case NORMAL:
-                            Log.record("小鸡太饿，离家出走了");
-                            break;
-                        case PIRATE:
-                            Log.record("小鸡外出探险了");
-                            break;
-                        case WORK:
-                            Log.record("小鸡出去工作啦");
-                            break;
-                        default:
-                            Log.record("小鸡不在庄园" + " " + ownerAnimal.subAnimalType);
+                    // 服务端可能下发枚举外的新状态：安全解析，未知值只记一条日志，不能让整轮任务（含后面的喂食）被异常带走
+                    SubAnimalType subAnimalType = null;
+                    try {
+                        subAnimalType = SubAnimalType.valueOf(ownerAnimal.subAnimalType);
+                    } catch (Throwable ignored) {
+                    }
+                    if (subAnimalType == null) {
+                        Log.record("小鸡不在庄园" + " " + ownerAnimal.subAnimalType);
+                    } else {
+                        switch (subAnimalType) {
+                            case GUEST:
+                                guest = true;
+                                Log.record("小鸡到好友家去做客了");
+                                break;
+                            case NORMAL:
+                                Log.record("小鸡太饿，离家出走了");
+                                break;
+                            case PIRATE:
+                                Log.record("小鸡外出探险了");
+                                break;
+                            case WORK:
+                                Log.record("小鸡出去工作啦");
+                                break;
+                        }
                     }
 
                     boolean hungry = false;
                     String userName = UserIdMap.getMaskName(AntFarmRpcCall.farmId2UserId(ownerAnimal.currentFarmId));
-                    switch (AnimalFeedStatus.valueOf(ownerAnimal.animalFeedStatus)) {
-                        case HUNGRY:
-                            hungry = true;
-                            Log.record("小鸡在[" + userName + "]的庄园里挨饿");
-                            break;
-
-                        case EATING:
-                            Log.record("小鸡在[" + userName + "]的庄园里吃得津津有味");
-                            break;
+                    AnimalFeedStatus feedStatus = null;
+                    try {
+                        feedStatus = AnimalFeedStatus.valueOf(ownerAnimal.animalFeedStatus);
+                    } catch (Throwable ignored) {
+                    }
+                    if (feedStatus == AnimalFeedStatus.HUNGRY) {
+                        hungry = true;
+                        Log.record("小鸡在[" + userName + "]的庄园里挨饿");
+                    } else if (feedStatus == AnimalFeedStatus.EATING) {
+                        Log.record("小鸡在[" + userName + "]的庄园里吃得津津有味");
+                    } else if (feedStatus == null) {
+                        Log.record("小鸡状态未知" + " " + ownerAnimal.animalFeedStatus);
                     }
 
                     boolean recall = false;
@@ -343,6 +353,11 @@ public class AntFarm extends ModelTask {
                     if (recall) {
                         recallAnimal(ownerAnimal.animalId, ownerAnimal.currentFarmId, ownerFarmId, userName);
                         syncAnimalStatus(ownerFarmId);
+                        // 召回是异步生效的：立刻 sync 可能还读到"在别家"，隔几秒补一次，免得本轮漏喂
+                        if (!AnimalInteractStatus.HOME.name().equals(ownerAnimal.animalInteractStatus)) {
+                            TimeUtil.sleep(3000);
+                            syncAnimalStatus(ownerFarmId);
+                        }
                     }
                 }
             }
@@ -902,6 +917,7 @@ public class AntFarm extends ModelTask {
         try {
             JSONObject jo = new JSONObject(AntFarmRpcCall.recallAnimal(animalId, currentFarmId, masterFarmId));
             if (!MessageUtil.checkMemo(TAG, jo)) {
+                retryRecallAnimal(animalId, currentFarmId, masterFarmId, user);
                 return;
             }
             double foodHaveStolen = jo.getDouble("foodHaveStolen");
@@ -909,7 +925,27 @@ public class AntFarm extends ModelTask {
             // 这里不需要加
         } catch (Throwable t) {
             Log.err(TAG, "recallAnimal err:", t);
+            retryRecallAnimal(animalId, currentFarmId, masterFarmId, user);
         }
+    }
+
+    /** 召回失败后 10 秒静默重试一次：重试失败不再记日志（失败原因上一条已记过），成功照常记录 */
+    private void retryRecallAnimal(String animalId, String currentFarmId, String masterFarmId, String user) {
+        String taskId = "RA|" + animalId;
+        if (hasChildTask(taskId)) {
+            removeChildTask(taskId);
+        }
+        addChildTask(new ChildModelTask(taskId, "RA", () -> {
+            try {
+                JSONObject jo = new JSONObject(AntFarmRpcCall.recallAnimal(animalId, currentFarmId, masterFarmId));
+                if ("SUCCESS".equals(jo.optString("memo"))) {
+                    double foodHaveStolen = jo.getDouble("foodHaveStolen");
+                    Log.farm("召回小鸡📣偷吃[" + user + "]饲料" + foodHaveStolen + "g");
+                }
+            } catch (Throwable t) {
+                Log.err(TAG, "retryRecallAnimal err:", t);
+            }
+        }, System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(10)));
     }
 
     private void sendBackAnimal() {
@@ -2774,6 +2810,9 @@ public class AntFarm extends ModelTask {
                         continue;
                     }
                     String title = bizInfo.optString("title");
+                    // 开箱类任务的完成条件是**服务端的开箱计数**，申报完成不会让计数推进
+                    // （申报只会被拒，伪申报被拒后又会被判"兜底未生效"拉黑），只能真去开箱
+                    String actionType = bizInfo.optString("actionType", "");
                     // 去重键带轮次与阶段序号：同一轮内同阶段只动作一次（防重复请求），
                     // 但下一轮可再试——服务端状态推进有延迟，跨轮仍可能落到新阶段
                     String attemptKey = taskType + "#" + rightsTimes + "@" + round;
@@ -2827,16 +2866,31 @@ public class AntFarm extends ModelTask {
                         // 当日标记把后续档位全挡下、任务停在第一档。单次任务保持原 key，语义不变。
                         String policyKey = "farm::optionalplay::" + sceneCode + "/" + taskType
                                 + (rightsTimesLimit > 1 ? "#" + rightsTimes : "");
-                        // 走统一策略：完成后按列表核对，400000040 时由策略代为伪申报
+                        // 走统一策略：完成后按列表核对，400000040 时由策略代为伪申报；
+                        // 开箱类任务的尝试动作 = 真去开箱（申报完成对它是无效动作）
+                        final boolean unwrapTask = isUnwrapAction(actionType);
+                        final String taskTitleForLog = title;
+                        TaskAttemptPolicy.Site playSite = new TaskAttemptPolicy.Site(
+                                "AntFarmDrawMachineTaskList", "庄园乐园限定任务",
+                                taskType, sceneCode, TaskAlternative.DEFAULT_VERSION, null,
+                                (k) -> probeOptionalPlayStatus(sceneCode, taskType),
+                                (k) -> probeOptionalPlayExhausted(sceneCode, taskType),
+                                unwrapTask);
+                        if (rightsTimesLimit > 1 && rightsTimes + 1 < rightsTimesLimit) {
+                            // 多档里程碑的中间档（这次做完还有余量）：列表要打满才变完成，
+                            // 列表复核会把它误判"未完成"，进而挡住后续档位
+                            playSite = playSite.withTrustResponse();
+                        }
                         Outcome outcome = TaskAttemptPolicy.handle(
                                 policyKey, label, null,
-                                () -> attemptOptionalPlayTask(sceneCode, taskType, label), Log::farm,
-                                new TaskAttemptPolicy.Site("AntFarmDrawMachineTaskList", "庄园乐园限定任务",
-                                        taskType, sceneCode, TaskAlternative.DEFAULT_VERSION, null,
-                                        (k) -> probeOptionalPlayStatus(sceneCode, taskType),
-                                        (k) -> probeOptionalPlayExhausted(sceneCode, taskType)));
-                        // 被当日标记挡下（已试过）不算推进，否则每轮都白转一遍
-                        if (outcome != Outcome.TRIED_TODAY && outcome != Outcome.SKIPPED) {
+                                () -> unwrapTask
+                                        ? openFarmLeyuanBoxes(taskTitleForLog)
+                                        : attemptOptionalPlayTask(sceneCode, taskType, label), Log::farm,
+                                playSite);
+                        // 只有真正推进了才算"本轮有新动作"：做不了（UNABLE）与临时故障（RETRY）
+                        // 不该让外层重拉列表空转，被当日标记挡下（TRIED_TODAY）同样不算
+                        if (outcome == Outcome.DONE || outcome == Outcome.TRIGGERED
+                                || outcome == Outcome.AWARDED) {
                             progressed = true;
                         }
                     }
@@ -2852,6 +2906,50 @@ public class AntFarm extends ModelTask {
         } catch (Throwable th) {
             Log.err(TAG, "queryOptionalPlay err:", th);
         }
+    }
+
+    /** 开箱类动作（累计开箱 N 个）：完成条件在服务端的开箱计数上，只能真开箱，申报无效 */
+    private static boolean isUnwrapAction(String actionType) {
+        return "ACC_UNWRAP".equals(actionType) || "UNWRAP".equals(actionType);
+    }
+
+    /**
+     * 开箱类乐园任务的尝试动作：把当前可开宝箱逐个开掉（庄园侧接口一次开一个）。
+     * <p>没有可开的箱子时返回 UNABLE——任务没完成是"箱子不够"，不是接口不行，不能退到伪申报。
+     */
+    private Outcome openFarmLeyuanBoxes(String taskTitle) {
+        try {
+            JSONObject jo = new JSONObject(AntFarmRpcCall.queryGameList());
+            if (!jo.optBoolean("success")) {
+                return Outcome.RETRY;
+            }
+            JSONObject drawRights = jo.optJSONObject("gameCenterDrawRights");
+            if (drawRights == null) {
+                return Outcome.RETRY;
+            }
+            int quotaCanUse = drawRights.optInt("quotaCanUse");
+            if (quotaCanUse <= 0) {
+                Log.farm("小鸡乐园🎁[开宝箱]暂无可开宝箱#待攒够箱子");
+                return Outcome.UNABLE;
+            }
+            int opened = 0;
+            // 上限防服务端不扣额度时死循环；正常由 quotaCanUse 归零退出
+            for (int i = 0; i < MAX_GAME_DRAW_ROUND && quotaCanUse > 0; i++) {
+                JSONObject drawRes = new JSONObject(AntFarmRpcCall.drawGameCenterAward(1));
+                if (!drawRes.optBoolean("success")) {
+                    break;
+                }
+                JSONObject nextRights = drawRes.optJSONObject("gameCenterDrawRights");
+                quotaCanUse = nextRights != null ? nextRights.optInt("quotaCanUse") : (quotaCanUse - 1);
+                opened++;
+                TimeUtil.sleep(3000);
+            }
+            Log.farm("小鸡乐园🎁开宝箱×" + opened + "#用于[" + taskTitle + "]");
+            return opened > 0 ? Outcome.DONE : Outcome.UNABLE;
+        } catch (Throwable t) {
+            Log.err(TAG, "openFarmLeyuanBoxes err:", t);
+        }
+        return Outcome.RETRY;
     }
 
     /** 乐园限定任务完成上报：{@code com.alipay.antiep.finishTask}。 */

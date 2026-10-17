@@ -7,6 +7,7 @@ import java.util.List;
 import io.github.aw1y2z.sesame.hook.ApplicationHook;
 import io.github.aw1y2z.sesame.model.base.TaskAlternative;
 import io.github.aw1y2z.sesame.util.RandomUtil;
+import io.github.aw1y2z.sesame.util.StringUtil;
 import io.github.aw1y2z.sesame.util.idMap.UserIdMap;
 
 public class AntOrchardRpcCall {
@@ -93,8 +94,9 @@ public class AntOrchardRpcCall {
      * 庄园的正解就是这条接口（2026-09-22 实测 cclyx / ipccl 前缀的游戏任务走它全部成功）。
      */
     public static String doFarmTask(String bizKey, String taskSceneCode) {
-        // 另一种实现方案 payload 只剩一份实现，见 TaskAlternative.request（version 沿用本模块的 VERSION）
-        return TaskAlternative.request(bizKey, taskSceneCode, VERSION);
+        // 另一种实现方案 payload 只剩一份实现，见 TaskAlternative.request（version 沿用本模块的 VERSION）。
+        // 场景码必须传本模组的 ORCHARD：兜底默认是庄园的 ANTFARM，会被判"场景不合法"
+        return TaskAlternative.request(bizKey, taskSceneCode, VERSION, "ORCHARD");
     }
 
     public static String triggerTbTask(String taskId, String taskPlantType) {
@@ -138,7 +140,7 @@ public class AntOrchardRpcCall {
     }
 
     public static String switchPlantScene(String sceneName) {
-        return ApplicationHook.requestString("com.alipay.antorchard.switchPlantScene", "[{\"plantScene\":\"" + sceneName + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ORCHARD\",\"source\":\"ANTFARM_ORCHARD\"}]");
+        return ApplicationHook.requestString("com.alipay.antorchard.switchPlantScene", "[{\"plantScene\":\"" + StringUtil.escapeJson(sceneName) + "\",\"requestType\":\"NORMAL\",\"sceneCode\":\"ORCHARD\",\"source\":\"ANTFARM_ORCHARD\"}]");
     }
 
     public static String choosePrize(String orderId) {

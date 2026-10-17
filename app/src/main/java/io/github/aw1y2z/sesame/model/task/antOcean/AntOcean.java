@@ -22,7 +22,6 @@ import io.github.aw1y2z.sesame.model.base.TaskCommon;
 import io.github.aw1y2z.sesame.model.base.TaskAlternative;
 import io.github.aw1y2z.sesame.model.normal.answerAI.AnswerAI;
 import io.github.aw1y2z.sesame.model.task.antFarm.AntFarm.TaskStatus;
-import io.github.aw1y2z.sesame.model.task.antFarm.AntFarmRpcCall;
 import io.github.aw1y2z.sesame.model.task.antForest.AntForestRpcCall;
 import io.github.aw1y2z.sesame.util.JsonUtil;
 import io.github.aw1y2z.sesame.util.Log;
@@ -990,7 +989,9 @@ public class AntOcean extends ModelTask {
                         "ocean::" + sceneCode + "/" + taskType + "#" + (rightsTimes + cnt), taskTitle, null,
                         () -> attemptFinishOceanTask(sceneCode, taskType, taskTitle), Log::other,
                         new TaskAttemptPolicy.Site("AntOceanAntiepTaskList", "海洋任务", taskType, sceneCode,
-                                (k) -> probeOceanStatus(sceneCode, taskType)));
+                                (k) -> probeOceanStatus(sceneCode, taskType))
+                                // 本家值：任务场景 + ANTFOCEAN
+                                .withScene(sceneCode).withSource("ANTFOCEAN"));
                 if (outcome == Outcome.TRIED_TODAY || outcome == Outcome.SKIPPED) {
                     break;
                 }
@@ -1501,7 +1502,9 @@ public class AntOcean extends ModelTask {
         Outcome outcome = TaskAttemptPolicy.handle("ocean::fish::" + taskType, taskTitle, null,
                 () -> attemptAntfishFinishTask(taskTitle, taskType), Log::other,
                 new TaskAttemptPolicy.Site("AntOceanFishBlackList", "摸鱼任务", taskType, "ANTAIFISH",
-                        (k) -> probeAntfishStatus(taskType)));
+                        (k) -> probeAntfishStatus(taskType))
+                        // 本家值：ANTAIFISH
+                        .withScene("ANTAIFISH").withSource("ANTAIFISH"));
         return outcome == Outcome.DONE || outcome == Outcome.TRIGGERED;
     }
 

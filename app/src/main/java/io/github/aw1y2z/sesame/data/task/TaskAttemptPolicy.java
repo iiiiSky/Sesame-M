@@ -56,6 +56,18 @@ public class TaskAttemptPolicy {
      */
     private static final int RETRY_MAX_PER_DAY = 3;
 
+    /**
+     * 伪申报兜底当日最多几发。多发无用：同一发没让列表变完成，再发同样的请求也不会变。
+     * <p>该计数**与当日标记独立**：调用方重拉列表会换新 key（多档任务带档位），
+     * 只有计数才挡得住"换个键又把同一发打一遍"。
+     */
+    private static final int TRIGGER_MAX_PER_DAY = 1;
+
+    /** 列表复核的轮询间隔与轮数：服务端异步落定的任务（如森林「消耗活力值得机会」）要十几秒才变完成，
+     *  留足到 ~30s 以覆盖落定偏慢的情况（原先 6 轮≈18s 仍会把这类任务误判成失败）。 */
+    private static final long PROBE_INTERVAL_MS = 3000L;
+    private static final int PROBE_ROUNDS = 10;
+
     /** 处理结论 */
     public enum Outcome {
         /** 列表已确认完成（{@link #isDone}；完成任务后可能仍待领奖） */
@@ -206,6 +218,8 @@ public class TaskAttemptPolicy {
      * <p>与 {@link StatusProbe} 同源：探针本已拉到响应，次数信息顺手可取，不额外发请求。
      * <p>命中时只打**当日标记**、当日不再尝试；**不进黑名单**——这类任务是每日重置的，
      * 次日服务端次数归零、标记随 status.json 跨天清空，自然恢复尝试。
+     * <p>判据取服务端的**名额**而非本地记账：`rightsTimes`（已用）/`rightsTimesLimit`（额度），
+     * 二者相等即当日做满。服务端才是额度的权威，本地记账只用于避免重复请求。
      */
     public interface ExhaustedProbe {
         boolean exhausted(String key);
@@ -255,6 +269,30 @@ public class TaskAttemptPolicy {
         final StatusProbe probe;
         /** 当日额度是否用尽；null 表示无此判据。命中只打当日标记、不进黑名单 */
         final ExhaustedProbe exhausted;
+        /**
+         * 该任务的完成条件是**服务端的真实行为计数**（如累计开箱数），申报类动作推不动它。
+         * <p>为 true 时：伪申报失败**不进自动黑名单**——伪申报本来就不是它的完成路径，
+         * 按"兜底未生效"拉黑会把它永久停掉（表现为奖励再也领不到）。
+         */
+        final boolean realAction;
+        /**
+         * 伪申报（doFarmTask）用的场景码：**必须是本任务所属模组的场景**（庄园 {@code ANTFARM}、
+         * 农场 {@code ORCHARD}…），冒用会被判"场景不合法"。默认 {@link TaskAlternative#DEFAULT_SCENE_CODE}。
+         */
+        final String sceneCode;
+        /**
+         * 伪申报（doFarmTask）用的来源：取**本家 RPC 的 source**（农场 {@code ANTFARM_ORCHARD}、
+         * 新村 {@code AST}…）。默认 {@link TaskAlternative#DEFAULT_SOURCE}。
+         */
+        final String source;
+        /**
+         * 信任响应：该任务是**多档里程碑**型（如森林「消耗活力值得机会」2/2——一次兑换只推进进度、
+         * 列表状态不变，兑换满才 FINISHED）。
+         * <p>为 true 时**跳过列表复核**、直接以响应为准：探针在这种中间态上永远判"未完成"，
+         * 会把一次成功的兑换改判成做不了，进而挡住后续档位（实测卡在 1/2）。
+         * <p>最终状态仍由调用方重拉列表核对（如抽抽乐每档后的 doublecheck）。
+         */
+        final boolean trustResponse;
 
         public Site(String listField, String logPrefix, String bizKey, String taskSceneCode) {
             this(listField, logPrefix, bizKey, taskSceneCode, TaskAlternative.DEFAULT_VERSION, null, null, null);
@@ -266,6 +304,12 @@ public class TaskAttemptPolicy {
 
         public Site(String listField, String logPrefix, String bizKey, String taskSceneCode, StatusProbe probe) {
             this(listField, logPrefix, bizKey, taskSceneCode, TaskAlternative.DEFAULT_VERSION, null, probe, null);
+        }
+
+        /** 带「当日打满」判据的简写形态（无 forge）。 */
+        public Site(String listField, String logPrefix, String bizKey, String taskSceneCode,
+                    StatusProbe probe, ExhaustedProbe exhausted) {
+            this(listField, logPrefix, bizKey, taskSceneCode, TaskAlternative.DEFAULT_VERSION, null, probe, exhausted);
         }
 
         public Site(String listField, String logPrefix, String bizKey, String taskSceneCode, String version) {
@@ -287,9 +331,39 @@ public class TaskAttemptPolicy {
             this(listField, logPrefix, bizKey, taskSceneCode, version, forge, probe, null);
         }
 
-        /** 带「当日打满」判据的完整形态。 */
+        /** 带「当日打满」判据的简写形态（无 forge、非真实行为类）。 */
         public Site(String listField, String logPrefix, String bizKey, String taskSceneCode, String version,
                     Forge forge, StatusProbe probe, ExhaustedProbe exhausted) {
+            this(listField, logPrefix, bizKey, taskSceneCode, version, forge, probe, exhausted, false);
+        }
+
+        /** 完整形态：{@code realAction=true} 表示完成条件在服务端真实行为计数上（如累计开箱） */
+        public Site(String listField, String logPrefix, String bizKey, String taskSceneCode, String version,
+                    Forge forge, StatusProbe probe, ExhaustedProbe exhausted, boolean realAction) {
+            this(listField, logPrefix, bizKey, taskSceneCode, version, forge, probe, exhausted, realAction,
+                    TaskAlternative.DEFAULT_SCENE_CODE);
+        }
+
+        /** 完整形态 + 指定伪申报场景码（农场传 ORCHARD、森林传 ANTFOREST…），来源用默认 H5。 */
+        public Site(String listField, String logPrefix, String bizKey, String taskSceneCode, String version,
+                    Forge forge, StatusProbe probe, ExhaustedProbe exhausted, boolean realAction,
+                    String sceneCode) {
+            this(listField, logPrefix, bizKey, taskSceneCode, version, forge, probe, exhausted, realAction,
+                    sceneCode, TaskAlternative.DEFAULT_SOURCE);
+        }
+
+        /** 完整形态 + 指定伪申报场景码与来源。 */
+        public Site(String listField, String logPrefix, String bizKey, String taskSceneCode, String version,
+                    Forge forge, StatusProbe probe, ExhaustedProbe exhausted, boolean realAction,
+                    String sceneCode, String source) {
+            this(listField, logPrefix, bizKey, taskSceneCode, version, forge, probe, exhausted, realAction,
+                    sceneCode, source, false);
+        }
+
+        /** 完整形态 + 信任响应（多档里程碑任务：列表中间态不作数，见 {@link #trustResponse}）。 */
+        public Site(String listField, String logPrefix, String bizKey, String taskSceneCode, String version,
+                    Forge forge, StatusProbe probe, ExhaustedProbe exhausted, boolean realAction,
+                    String sceneCode, String source, boolean trustResponse) {
             this.listField = listField;
             this.logPrefix = logPrefix;
             this.bizKey = bizKey;
@@ -298,6 +372,28 @@ public class TaskAttemptPolicy {
             this.forge = forge;
             this.probe = probe;
             this.exhausted = exhausted;
+            this.realAction = realAction;
+            this.sceneCode = sceneCode;
+            this.source = source;
+            this.trustResponse = trustResponse;
+        }
+
+        /** 返回一个只把伪申报场景码换掉的副本；用法 {@code new Site(...).withScene("ORCHARD")}。 */
+        public Site withScene(String sceneCode) {
+            return new Site(listField, logPrefix, bizKey, taskSceneCode, version, forge, probe, exhausted,
+                    realAction, sceneCode, source, trustResponse);
+        }
+
+        /** 返回一个只把伪申报来源换掉的副本；用法 {@code new Site(...).withSource("AST")}。 */
+        public Site withSource(String source) {
+            return new Site(listField, logPrefix, bizKey, taskSceneCode, version, forge, probe, exhausted,
+                    realAction, sceneCode, source, trustResponse);
+        }
+
+        /** 返回一个「信任响应」的副本；用法 {@code new Site(...).withTrustResponse()}。 */
+        public Site withTrustResponse() {
+            return new Site(listField, logPrefix, bizKey, taskSceneCode, version, forge, probe, exhausted,
+                    realAction, sceneCode, source, true);
         }
     }
 
@@ -363,7 +459,8 @@ public class TaskAttemptPolicy {
         // 必须限定同一天：日任务次日会重新回到待办，那是新实例，据此拉黑会误伤能做的任务。
         // 可靠性依据：伪申报被服务端接受后任务会很快判定完成，故"同一天内再次出现"才是兜底没写成的可靠证据；
         // 跨天出现一律按新实例处理。
-        if (isSameDayTriggered(key) && autoBlackList(site, title)) {
+        // 真实行为类任务不走这条：伪申报不是它的完成路径，判"兜底未生效"是错怪
+        if (isSameDayTriggered(key) && (site == null || !site.realAction) && autoBlackList(site, title)) {
             clearTriggered(key);
             Status.flagToday(flag);
             log.accept("任务尝试🧊兜底未生效[" + title + "]#已交自动黑名单");
@@ -392,9 +489,13 @@ public class TaskAttemptPolicy {
         try {
             outcome = attempt.run();
             // 列表复核：完成与否一律以任务列表为准——只有列表能宣布"完成"，响应不可信
-            if (site != null && site.probe != null) {
-                TimeUtil.sleep(1500);
-                ProbeResult pr = site.probe.probe(key);
+            // （多档里程碑任务除外：中间态在列表上永远不完成，见 Site#trustResponse）
+            if (site != null && site.probe != null && !site.trustResponse) {
+                // 仅当响应成功时才长轮询等待异步落定（如森林「消耗活力值得机会」十几秒才变完成）；
+                // 未成功的尝试无需空等，单次快速核对即可，避免把每个做不了的任务都拖满整段轮询窗口。
+                ProbeResult pr = (outcome == Outcome.DONE)
+                        ? probeWithPolling(site.probe, key)
+                        : site.probe.probe(key);
                 if (isDone(pr)) {
                     listDone = true;
                 } else if (outcome == Outcome.DONE) {
@@ -423,10 +524,18 @@ public class TaskAttemptPolicy {
         if (outcome == Outcome.UNSUPPORTED) {
             if (site == null || site.bizKey == null) {
                 outcome = Outcome.UNABLE;
+            } else if (Status.getIntFlagToday("attemptTrigger::" + sanitize(key)) >= TRIGGER_MAX_PER_DAY) {
+                // 伪申报当天已试过仍没做成 ⇒ 双保险没生效。按原有语义**收手并落当日标记**（进自动拉黑，
+                // 避免每轮重打同一发）。触发计数与当日标记无关，故重拉列表换 key 时依然挡得住。
+                log.accept("任务尝试⏳未完成[" + title + "]#今日不再尝试");
+                Status.flagToday(flag);
+                return Outcome.UNABLE;
             } else {
                 // 伪申报：doFarmTask 响应不可信（常回 102 而任务已生效），成败一律以任务列表为准
                 TaskAlternative.trigger(null, null, title, site.bizKey, site.taskSceneCode,
-                        site.version, site.logPrefix, log::accept);
+                        site.version, site.sceneCode, site.source, site.logPrefix, log::accept);
+                String triggerKey = "attemptTrigger::" + sanitize(key);
+                Status.setIntFlagToday(triggerKey, Status.getIntFlagToday(triggerKey) + 1);
                 markTriggered(key);
                 Status.flagToday(flag);
                 return Outcome.TRIGGERED;
@@ -439,6 +548,13 @@ public class TaskAttemptPolicy {
         if (outcome == Outcome.DONE) {
             return outcome;
         }
+        // 本次已用掉一次伪申报兜底、列表却仍未确认完成：说明服务端确实没认这一发。
+        // 此时**不落当日标记**——调用方（如多档任务重拉列表）会换新 key 再试，
+        // 而那一发会被上面的伪申报去重计数挡住，既不会重复上报、也不会每轮重打。
+        if (outcome == Outcome.UNSUPPORTED && Status.getIntFlagToday("attemptTrigger::" + sanitize(key)) > 0) {
+            log.accept("任务尝试⏳未完成[" + title + "]#兜底已用过一次");
+            return Outcome.UNABLE;
+        }
         // 临时故障：计数后放行（次数上限由入口的前置检查把关，避免服务端状态不推进时整天重试）
         if (outcome == Outcome.RETRY) {
             String retryKey = "attemptRetry::" + sanitize(key);
@@ -450,6 +566,24 @@ public class TaskAttemptPolicy {
         }
         Status.flagToday(flag);
         return outcome;
+    }
+
+    /**
+     * 轮询探针直到列表宣布完成：有些任务服务端是**异步落定**的，响应回来时列表还是待办
+     * （如森林「消耗活力值得机会」会在十几秒后才变完成），固定睡一次会把它误判成做不了。
+     * <p>命中即返回；总等待上限 {@link #PROBE_ROUNDS} × {@link #PROBE_INTERVAL_MS}，
+     * 未完成的常见情形仍只等一轮，不会拖慢日常。
+     */
+    private static ProbeResult probeWithPolling(StatusProbe probe, String key) {
+        ProbeResult pr = null;
+        for (int round = 1; round <= PROBE_ROUNDS; round++) {
+            TimeUtil.sleep(PROBE_INTERVAL_MS);
+            pr = probe.probe(key);
+            if (isDone(pr)) {
+                return pr;
+            }
+        }
+        return pr;
     }
 
     /** 按自动黑名单规则记账（{@link MessageUtil#MarkTaskBlackList} 会跳过用户手动加入的条目与白名单项） */
@@ -540,9 +674,17 @@ public class TaskAttemptPolicy {
         }
     }
 
-    /** 定位键可能含 : / | 等字符，压成安全形式并限长（当日标记落进 status.json，伪申报记录落进 runtimeInfo.json） */
+    /**
+     * 定位键可能含 : / | 等字符，压成安全形式并限长（当日标记落进 status.json，伪申报记录落进 runtimeInfo.json）。
+     * <p>超长时**头尾各留一段**：档位/序号在键尾（{@code #5}、{@code @2}），只截前段会让不同档位串成同一个键，
+     * 首档的当日标记就会挡住后续档位（键越长的任务越容易踩到，实测最长已到 87 字符、余量不足 33）。
+     */
     private static String sanitize(String key) {
         String safe = key.replaceAll("[^0-9A-Za-z_.\\-]", "_");
-        return safe.length() > 120 ? safe.substring(0, 120) : safe;
+        if (safe.length() <= 120) {
+            return safe;
+        }
+        // 头 40 + 分隔符 + 尾 79 = 120
+        return safe.substring(0, 40) + "_" + safe.substring(safe.length() - 79);
     }
 }

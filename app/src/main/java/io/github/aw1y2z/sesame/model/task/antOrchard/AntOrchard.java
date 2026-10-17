@@ -3,7 +3,6 @@ package io.github.aw1y2z.sesame.model.task.antOrchard;
 import io.github.aw1y2z.sesame.data.ConfigV2;
 import io.github.aw1y2z.sesame.entity.AlipayAntOrchardTaskList;
 import io.github.aw1y2z.sesame.entity.AlipayOrchardChouChouLeTaskList;
-import io.github.aw1y2z.sesame.entity.AlipayMemberCreditSesameTaskList;
 import io.github.aw1y2z.sesame.entity.AlipayPlantScene;
 import io.github.aw1y2z.sesame.entity.AlipayUser;
 import io.github.aw1y2z.sesame.data.ModelFields;
@@ -12,7 +11,6 @@ import io.github.aw1y2z.sesame.data.task.ModelTask;
 import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy;
 import io.github.aw1y2z.sesame.data.task.TaskAttemptPolicy.Outcome;
 import io.github.aw1y2z.sesame.data.task.TaskAward;
-import io.github.aw1y2z.sesame.hook.ApplicationHook;
 import io.github.aw1y2z.sesame.hook.Toast;
 import io.github.aw1y2z.sesame.model.base.TaskCommon;
 import io.github.aw1y2z.sesame.model.base.TaskAlternative;
@@ -20,9 +18,7 @@ import io.github.aw1y2z.sesame.data.modelFieldExt.BooleanModelField;
 import io.github.aw1y2z.sesame.data.modelFieldExt.ChoiceModelField;
 import io.github.aw1y2z.sesame.data.modelFieldExt.IntegerModelField;
 import io.github.aw1y2z.sesame.data.modelFieldExt.SelectModelField;
-import io.github.aw1y2z.sesame.model.task.antFarm.AntFarmRpcCall;
 import io.github.aw1y2z.sesame.model.task.antGame.GameTask;
-import io.github.aw1y2z.sesame.model.task.antMember.AntMemberRpcCall;
 import io.github.aw1y2z.sesame.util.Log;
 import io.github.aw1y2z.sesame.util.MessageUtil;
 import io.github.aw1y2z.sesame.util.Status;
@@ -38,17 +34,13 @@ import java.util.LinkedHashSet;
 import java.util.Set;
 
 import io.github.aw1y2z.sesame.util.*;
-import io.github.aw1y2z.sesame.util.idMap.AntFarmDoFarmTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntOrchardTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.OrchardChouChouLeTaskListMap;
-import io.github.aw1y2z.sesame.util.idMap.MemberCreditSesameTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.PlantSceneIdMap;
 import io.github.aw1y2z.sesame.util.idMap.UserIdMap;
 
 import java.util.*;
 
-import android.content.Context;
-import android.content.Intent;
 
 public class AntOrchard extends ModelTask {
     private static final String TAG = "AntOrchard";
@@ -313,14 +305,22 @@ public class AntOrchard extends ModelTask {
                             continue;
                         }
                         for (int cnt = 0; cnt < remain; cnt++) {
+                            TaskAttemptPolicy.Site chouChouLeSite = new TaskAttemptPolicy.Site(
+                                    "OrchardChouChouLeTaskList", "农场抽抽乐",
+                                    taskType, taskSceneCode,
+                                    (k) -> probeOrchardChouChouLeStatus(sceneCode, taskSceneCode, taskType))
+                                    // 本家值：ORCHARD + ANTFARM_ORCHARD
+                                    .withScene("ORCHARD").withSource("ANTFARM_ORCHARD");
+                            if (cnt < remain - 1) {
+                                // 多档里程碑的中间档：列表要打满才变完成，列表复核会误判"未完成"、挡住下一档
+                                chouChouLeSite = chouChouLeSite.withTrustResponse();
+                            }
                             Outcome outcome = TaskAttemptPolicy.handle(
                                     "orchard::chouchoule::" + taskSceneCode + "/" + taskType
                                             + "#" + (rightsTimes + cnt) + "@" + loopCount,
                                     taskName, null,
                                     () -> attemptChouChouLeFinish(taskSceneCode, taskType, taskName), Log::farm,
-                                    new TaskAttemptPolicy.Site("OrchardChouChouLeTaskList", "农场抽抽乐",
-                                            taskType, taskSceneCode,
-                                            (k) -> probeOrchardChouChouLeStatus(sceneCode, taskSceneCode, taskType)));
+                                    chouChouLeSite);
                             if (outcome == Outcome.DONE || outcome == Outcome.TRIGGERED
                                     || outcome == Outcome.AWARDED) {
                                 doublecheck = true;
@@ -521,15 +521,27 @@ public class AntOrchard extends ModelTask {
                         }
                         String label = rightsTimesLimit > 1
                                 ? title + "(" + (rightsTimes + 1) + "/" + rightsTimesLimit + ")" : title;
+                        // key 必须带档位：多次任务每推进一档都是新的尝试，不带档位会让第一档落下的
+                        // 当日标记把后续档位全挡下、任务停在第一档。单次任务保持原 key，语义不变。
+                        String policyKey = "orchard::optionalplay::" + sceneCode + "/" + taskType
+                                + (rightsTimesLimit > 1 ? "#" + rightsTimes : "");
                         // 走统一策略：400000040 时由 TaskAttemptPolicy 代为 doFarmTask 伪申报，
                         // 裸调 finishTask 会把 UNSUPPORTED 吞成 false，兜底永不触发
+                        TaskAttemptPolicy.Site playSite = new TaskAttemptPolicy.Site(
+                                "AntOrchardTaskList", "农场乐园限定任务",
+                                taskType, sceneCode, TaskAlternative.DEFAULT_VERSION, null,
+                                (k) -> probeOrchardOptionalPlayStatus(sceneCode, taskType),
+                                (k) -> probeOrchardOptionalPlayExhausted(sceneCode, taskType))
+                                .withScene("ORCHARD").withSource("ANTFARM_ORCHARD");
+                        if (rightsTimesLimit > 1 && rightsTimes + 1 < rightsTimesLimit) {
+                            // 多档里程碑的中间档（这次做完还有余量）：列表要打满才变完成，
+                            // 列表复核会把它误判"未完成"，进而挡住后续档位
+                            playSite = playSite.withTrustResponse();
+                        }
                         Outcome outcome = TaskAttemptPolicy.handle(
-                                "orchard::optionalplay::" + sceneCode + "/" + taskType, label, null,
+                                policyKey, label, null,
                                 () -> attemptFinishOptionalPlayTask(sceneCode, taskType, label), Log::farm,
-                                new TaskAttemptPolicy.Site("AntOrchardTaskList", "农场乐园限定任务",
-                                        taskType, sceneCode, TaskAlternative.DEFAULT_VERSION, null,
-                                        (k) -> probeOrchardOptionalPlayStatus(sceneCode, taskType),
-                                        (k) -> probeOrchardOptionalPlayExhausted(sceneCode, taskType)));
+                                playSite);
                         // 被当日标记挡下（已试过）不算推进，否则每轮都白转一遍
                         if (outcome != Outcome.TRIED_TODAY && outcome != Outcome.SKIPPED) {
                             progressed = true;
@@ -1026,7 +1038,8 @@ public class AntOrchard extends ModelTask {
             Log.farm("芭芭农场🌳" + scene.nickname() + "施肥#消耗[" + cost + "g肥料]"
                     + (batch ? "#一键5次" : "") + "#目标[" + targetSpreadTimes() + "次]");
 
-            // 检查施肥进度：单次只加 0.01%(1) 或 一键5次只加 0.05%(5) 即被限制施肥，当天不再施肥
+            // 检查施肥进度：单次只加 0.01%(1) 或 一键5次只加 0.05%(5) 即被限制施肥，当天不再施肥。
+            // 这是**风控信号**：服务端受理了请求却只让进度挪最小一格，继续施只会白耗肥料，故当日停。
             if (taobaoData.has("currentStage")) {
                 JSONObject stage = taobaoData.getJSONObject("currentStage");
                 int newProgress = stage.optInt("totalValue", fertilizerProgress);
@@ -1422,6 +1435,8 @@ public class AntOrchard extends ModelTask {
                         try {
                             rightsTimesLimit = Integer.parseInt(limitStr);
                         } catch (Exception ignored) {
+                            // 坏值等于没给：这条任务会被当单档跑，必须留痕
+                            Log.i(TAG, "rightsTimesLimit 非法，按单档处理: " + limitStr);
                         }
                     }
                 }
@@ -1435,7 +1450,12 @@ public class AntOrchard extends ModelTask {
                     // taskId 当作 taskType 传给 finishTask（该 RPC 的参数名就叫 taskType）
                     String via = finishTaskTwice(sceneCode, title, taskId);
                     if (via != null) {
-                        Log.farm("肥料任务🧾完成[" + title + "]第" + (rightsTimes + cnt + 1) + "次");
+                        // 响应成功 ≠ 服务端已推进：实测"逛一逛快手/逛一逛淘宝拍照"等回成功但任务仍 0/N。
+                        // 故不再按响应打「完成」，交 verifyPendingTasksByList 用任务列表定论
+                        // （做成→打当日标记；没做成→交自动拉黑），避免假完成与每轮重刷。
+                        Log.farm("肥料任务🕓已触发[" + title + "]第" + (rightsTimes + cnt + 1) + "次#" + via
+                                + "，结果以任务列表为准");
+                        pendingVerifyTasks.put(taskId, title);
                     } else {
                         break;
                     }
@@ -1446,19 +1466,32 @@ public class AntOrchard extends ModelTask {
 
             // 处理触发型任务
             if ("TRIGGER".equals(actionType) || "ADD_HOME".equals(actionType) || "PUSH_SUBSCRIBE".equals(actionType)) {
-                // taskId 当作 taskType 传递
+                // taskId 当作 taskType 传递。同 VISIT：响应成功 ≠ 服务端已推进
+                // （实测"试玩农场爆款游戏"回成功但任务仍 0/1），故不按响应打「完成」，
+                // 交 verifyPendingTasksByList 用任务列表定论。
                 String via = finishTaskTwice(sceneCode, title, taskId);
                 if (via != null) {
-                    Log.farm("肥料任务🧾完成[" + title + "]");
+                    Log.farm("肥料任务🕓已触发[" + title + "]#" + via + "，结果以任务列表为准");
+                    pendingVerifyTasks.put(taskId, title);
                 }
                 return true;
             }
 
-            //配合黑名单的兜底操作
+            // 兜底：actionType 未知（SYSTEM_SWITCH / ANTFARM_COLLECT_MANURE / ANTFOREST_DEFOLIATION /
+            // JUMP / P2P_NEW / GAME_CENTER 等）。这类任务多为"外跳打开淘宝/Tmall 页"或需真人操作，
+            // finishTask/doFarmTask 的**响应会撒谎**——实测回成功但任务仍 0/N（如"去淘宝农场得肥料"
+            // 需真打开淘宝页，Alipay 侧根本没有完成 RPC）。
+            // 故不再按响应打「完成」：触发后统一交 verifyPendingTasksByList 用任务列表定论
+            // （做成→打当日标记；没做成→交自动拉黑），并打当日标记避免同一天每轮重发、刷屏。
+            if (Status.hasFlagToday("orchard::fallback::" + taskId)) {
+                return true;
+            }
+            Status.flagToday("orchard::fallback::" + taskId);
             String via = finishTaskTwice(sceneCode, title, taskId);
             if (via != null) {
-                Log.farm("肥料任务🧾完成[" + title + "]");
+                Log.farm("肥料任务🕓已触发[" + title + "]#" + via + "，结果以任务列表为准");
             }
+            pendingVerifyTasks.put(taskId, title);
             return true;
         } catch (Throwable t) {
             Log.err(TAG, "finishOrchardTask err:", t);
@@ -2097,7 +2130,8 @@ public class AntOrchard extends ModelTask {
                                 () -> attemptLimitedTimeVisit(sceneCode, childTaskId), Log::farm,
                                 new TaskAttemptPolicy.Site("AntOrchardTaskList", "农场限时挑战",
                                         childTaskId, sceneCode,
-                                        (k) -> probeLimitedTimeChildStatus(childTaskId)));
+                                        (k) -> probeLimitedTimeChildStatus(childTaskId))
+                                        .withScene("ORCHARD").withSource("ANTFARM_ORCHARD"));
                         break;
 
                     default:

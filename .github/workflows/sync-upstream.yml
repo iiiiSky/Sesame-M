@@ -20,6 +20,7 @@ jobs:
       - name: Fetch upstream and merge (keep local commits)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUSH_TOKEN: ${{ secrets.PAT_TRIGGER }}
         run: |
           set -e
           git config user.name "github-actions[bot]"
@@ -27,7 +28,7 @@ jobs:
           git remote add upstream https://github.com/aw1y2z/Sesame-M.git
           git fetch upstream MIUIX-api102
           if git merge --no-edit upstream/MIUIX-api102 >/tmp/merge.log 2>&1; then
-            git push origin MIUIX-api102
+            git push "https://x-access-token:${PUSH_TOKEN}@github.com/iiiiSky/Sesame-M.git" MIUIX-api102
             echo "::notice::同步成功，已合并上游最新 MIUIX-api102"
           else
             echo "::error::与上游合并产生冲突，未改动本地仓库，请手动处理"

@@ -671,8 +671,8 @@ public class AntForestV2 extends ModelTask {
                     initAntForestTaskListMap(AutoAntForestVitalityTaskList.getValue(), AutoAntForestHuntTaskList.getValue(), receiveForestTaskAward.getValue(), ForestHunt.getValue());
                     Status.flagToday("BlackList::initAntForest");
                 }
-                // 新版保护地任务名单来自服务端下发：本地为空时每轮补一次，开了开关不必等到次日
-                if (monopolyTasks.getValue() && MonopolyTaskListMap.getMap().isEmpty()) {
+                // 新版保护地任务名单来自服务端下发：每轮同步一次，保证黑名单候选项与当前区域任务一致
+                if (monopolyTasks.getValue()) {
                     initMonopolyTaskListMap();
                 }
 

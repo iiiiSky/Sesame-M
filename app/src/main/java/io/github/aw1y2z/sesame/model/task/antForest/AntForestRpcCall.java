@@ -469,8 +469,9 @@ public class AntForestRpcCall {
     
     /* 新版保护地任务列表 */
     public static String listMonopolyTasks(String regionCode, String sceneCode) {
+        // regionCode 必须放在 extend 内，服务端才按区域返回完整任务列表
         return ApplicationHook.requestString("com.alipay.antieptask.listTaskopengreen",
-                "[{\"regionCode\":\"" + regionCode + "\",\"sceneCode\":\"" + sceneCode + "\",\"source\":\"ANTFOREST\","
+                "[{\"extend\":{\"regionCode\":\"" + regionCode + "\"},\"sceneCode\":\"" + sceneCode + "\",\"source\":\"ANTFOREST\","
                         + "\"requestType\":\"RPC\",\"zoneId\":\"Asia/Shanghai\",\"uniqueId\":\"" + RandomUtil.getRandomString(16) + "\"}]");
     }
     

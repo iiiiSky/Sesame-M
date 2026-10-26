@@ -1779,12 +1779,15 @@ public class AntForestV2 extends ModelTask {
     private void collectRobExpandEnergy(String propId, String propType) {
         try {
             JSONObject jo = new JSONObject(AntForestRpcCall.collectRobExpandEnergy(propId, propType));
-            if (MessageUtil.checkResultCode(TAG, jo)) {
+            if ("SUCCESS".equalsIgnoreCase(jo.optString("resultCode"))) {
                 int collectEnergy = jo.optInt("collectEnergy");
                 Log.forest("额外能量🎄收取[" + collectEnergy + "g]");
                 totalCollected += collectEnergy;
                 Statistics.addData(Statistics.DataType.COLLECTED, collectEnergy);
+                return;
             }
+            // 额外能量不足整数部分是服务端正常提示，非异常：按结果类记录，不打原始响应
+            Log.forest("额外能量⏭️" + jo.optString("resultDesc"));
         } catch (Throwable th) {
             Log.err(TAG, "collectRobExpandEnergy err:", th);
         }
@@ -2288,15 +2291,18 @@ public class AntForestV2 extends ModelTask {
 
     private static void sendEnergyByAction(String sourceType) {
         try {
-            // 先问询再发送：服务端不允许时（如当日额度用尽 USER_SEND_OVER_LIMIT）不发请求
+            // 线上逛街每天仅可完成一次：当天已发出或额度用尽后不再问询
+            if (Status.hasFlagToday("forest::greenLifeSendEnergy::" + sourceType)) {
+                return;
+            }
+            // 先问询再发送：服务端不允许时（如当日额度用尽）不发请求
             JSONObject jo = new JSONObject(GreenLifeRpcCall.consultForSendEnergyByAction(sourceType));
             if (!MessageUtil.checkSuccess(TAG, jo)) {
                 return;
             }
             JSONObject data = jo.getJSONObject("data");
             if (!data.optBoolean("canSendEnergy", false)) {
-                Log.i(TAG, "森林集市⏭️[" + sourceType + "]不可发送能量["
-                        + data.optString("resultCode", "") + "]，跳过");
+                Status.flagToday("forest::greenLifeSendEnergy::" + sourceType);
                 return;
             }
             jo = new JSONObject(GreenLifeRpcCall.sendEnergyByAction(sourceType));
@@ -2315,6 +2321,8 @@ public class AntForestV2 extends ModelTask {
             if (receivedEnergyAmount > 0) {
                 totalCollected += receivedEnergyAmount;
                 Statistics.addData(Statistics.DataType.COLLECTED, receivedEnergyAmount);
+                // 确认到账后才算当天已完成（线上逛街每天仅可完成一次）
+                Status.flagToday("forest::greenLifeSendEnergy::" + sourceType);
             }
         } catch (Throwable t) {
             Log.err(TAG, "sendEnergyByAction err:", t);

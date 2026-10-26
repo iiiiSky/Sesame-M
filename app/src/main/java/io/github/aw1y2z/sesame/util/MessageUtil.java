@@ -77,14 +77,15 @@ public class MessageUtil {
 
     /**
      * 打印失败应答。两类降噪：**服务端繁忙（102）**按 tag 限次打印；**400000040「不支持rpc调用」**
-     * 只写运行日志、不记模块错误——它不代表任务做不了（调用方会转另一种实现方案）。
+     * 只写异常日志、不记模块错误——它不代表任务做不了（调用方会转另一种实现方案）。
+     * <p>原始响应属异常，统一进异常日志（不进运行日志），运行日志只留过程类。
      * <p>注意：这里不拦截、不退避、不跳过——请求该发照发，只是少写几行日志。
      */
     public static void printErrorMessage(String tag, JSONObject jo, String errorMessageField) {
         try {
             String memo = jo.getString(errorMessageField);
             if (isUnsupportedRpc(jo)) {
-                Log.i(tag, jo.toString());
+                Log.error(tag + ", " + jo.toString());
                 return;
             }
             if (isServerBusy(jo)) {
@@ -92,11 +93,11 @@ public class MessageUtil {
                     return;
                 }
                 // 102 高频错误：只打一行 JSON（去掉文案行，避免每次都刷两条）
-                Log.i(tag, jo.toString());
+                Log.error(tag + ", " + jo.toString());
                 return;
             }
             recordFailure(tag, memo);
-            Log.i(memo, jo.toString());
+            Log.error(memo + ", " + jo.toString());
         } catch (Throwable t) {
             Log.err(TAG, "printErrorMessage err:", t);
         }

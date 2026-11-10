@@ -13,6 +13,7 @@ import io.github.aw1y2z.sesame.util.Log;
 import io.github.aw1y2z.sesame.util.MessageUtil;
 import io.github.aw1y2z.sesame.util.Status;
 import io.github.aw1y2z.sesame.util.TimeUtil;
+import io.github.aw1y2z.sesame.util.idMap.AntMemberAdTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.AntMemberTaskListMap;
 import io.github.aw1y2z.sesame.util.idMap.UserIdMap;
 
@@ -24,19 +25,26 @@ import io.github.aw1y2z.sesame.util.idMap.UserIdMap;
  * 由同一个 AntMember.run() 先后跑两遍（会员 + 广告），从而成为两个互相隔离的执行路径，
  * 各自有独立的开关与黑名单配置，但配置页只出现一块「会员任务」。
  * <p><b>取数去重</b>：两类共用同一次 RPC 取数结果（静态缓存 + 每轮 TTL），避免同一账号同时开启两类时
- * 每轮重复请求 signPageTaskList / queryAllStatusTaskList 加重风控；列表取不到(风控/1009)时写入
+ * 每轮重复请求 signPageTaskList / queryAllStatusTaskList 加重风控；列表连续多次取不到时写入
  * 共享的当日标记，两条路径一同跳过、当日不再重试。
  */
 public abstract class BaseAntMember extends ModelTask {
 
     protected final String TAG = getClass().getSimpleName();
 
-    /** 两个类共享的当日失败标记：列表取不到(风控/1009)即置位，后续轮次两条路径一起跳过，不再发 RPC */
+    /** 两个类共享的当日失败标记：取数连续失败到上限才置位，之后两条路径一起跳过、不再发 RPC */
     private static final String FLAG_SIGN_PAGE_TASK_FAILED = "MemberTask::signPageTaskListFailed";
 
     /** 两个类共享的当日"任务已完成"标记：列表为空(当天无可做任务)即置位，后续轮次跳过，不再发 RPC */
     private static final String FLAG_SIGN_PAGE_TASK_DONE = "MemberTask::signPageTaskListDone";
     private static final String FLAG_QUERY_ALL_TASK_DONE = "MemberTask::queryAllStatusTaskListDone";
+
+    /** 当日取数失败计数：连续失败到上限才落上面的标记，一次抖动不再废掉整天 */
+    private static final String INT_FLAG_SIGN_PAGE_FETCH_FAIL = "MemberTask::signPageTaskListFetchFail";
+    private static final int MAX_FETCH_FAILURES = 3;
+
+    /** 列表重拉上限：任务上报成功但服务端状态不前进时，force 刷新最多再跑几遍 */
+    private static final int MAX_RECHECK_ROUNDS = 3;
 
     /** 共享取数缓存：同一账号、TTL 内只真正取一次 */
     private static final long CACHE_TTL = 60_000L;
@@ -48,6 +56,25 @@ public abstract class BaseAntMember extends ModelTask {
     /** 日志标签：adOnly=true 用「会员广告任务」，false 用「会员任务」 */
     private static String labelFor(boolean adOnly) {
         return adOnly ? "会员广告任务" : "会员任务";
+    }
+
+    /** 广告任务判定：adTask=true 且无 targetBusiness。运行期过滤与候选项登记共用，避免两处判据漂移。 */
+    static boolean isAdTask(JSONObject task) {
+        if (task == null || !task.optBoolean("adTask")) {
+            return false;
+        }
+        JSONObject cfg = task.optJSONObject("taskConfigInfo");
+        if (cfg == null) {
+            cfg = task.optJSONObject("simpleTaskConfig");
+        }
+        JSONArray tb = cfg == null ? null : cfg.optJSONArray("targetBusiness");
+        if (tb == null || tb.length() == 0) {
+            tb = task.optJSONArray("targetBusiness");
+        }
+        if (tb != null && tb.length() > 0) {
+            return false;
+        }
+        return task.optString("targetBusiness", "").isEmpty();
     }
 
     @Override
@@ -76,13 +103,20 @@ public abstract class BaseAntMember extends ModelTask {
             return false;
         }
         boolean doubleCheck;
+        int recheck = 0;
         do {
             doubleCheck = processSignPageTaskList(jo, adOnly, blacklist);
-            if (doubleCheck) {
-                jo = fetchSignPageTaskList(true); // 有任务完成，强制刷新再跑一遍
+            if (!doubleCheck) {
+                break;
             }
+            // 服务端「上报成功但状态不前进」时这里会一直置 doubleCheck，force 刷新无限重发
+            if (++recheck > MAX_RECHECK_ROUNDS) {
+                Log.i(TAG, "会员任务列表重拉达到上限，本轮停止");
+                break;
+            }
+            jo = fetchSignPageTaskList(true); // 有任务完成，强制刷新再跑一遍
         }
-        while (doubleCheck && jo != null);
+        while (jo != null);
         return true;
     }
 
@@ -97,13 +131,19 @@ public abstract class BaseAntMember extends ModelTask {
             return;
         }
         boolean doubleCheck;
+        int recheck = 0;
         do {
             doubleCheck = processQueryAllStatusTaskList(jo, adOnly, blacklist);
-            if (doubleCheck) {
-                jo = fetchQueryAllStatusTaskList(true);
+            if (!doubleCheck) {
+                break;
             }
+            if (++recheck > MAX_RECHECK_ROUNDS) {
+                Log.i(TAG, "可领任务列表重拉达到上限，本轮停止");
+                break;
+            }
+            jo = fetchQueryAllStatusTaskList(true);
         }
-        while (doubleCheck && jo != null);
+        while (jo != null);
     }
 
     /**
@@ -132,8 +172,12 @@ public abstract class BaseAntMember extends ModelTask {
             JSONObject jo = new JSONObject(rawJson);
             TimeUtil.sleep(500);
             if (!MessageUtil.checkResultCode(TAG + " signPageTaskList", jo)) {
-                Status.flagToday(FLAG_SIGN_PAGE_TASK_FAILED);
+                handleFetchFailure("接口返回失败");
                 return null;
+            }
+            // 成功后清掉计数：只有「连续」失败才按风控处理，零星失败不该累积
+            if (Status.getIntFlagToday(INT_FLAG_SIGN_PAGE_FETCH_FAIL) > 0) {
+                Status.setIntFlagToday(INT_FLAG_SIGN_PAGE_FETCH_FAIL, 0);
             }
             // 成功响应即缓存(即使任务列表为空)，确保广告路径复用、不再重复请求；空列表由 process 处理
             cacheUid = uid;
@@ -142,8 +186,24 @@ public abstract class BaseAntMember extends ModelTask {
             return jo;
         } catch (Throwable t) {
             Log.err(TAG, "signPageTaskList err:", t);
-            Status.flagToday(FLAG_SIGN_PAGE_TASK_FAILED);
+            handleFetchFailure("请求异常");
             return null;
+        }
+    }
+
+    /**
+     * 取数失败的处置。
+     * <p>原实现「取不到列表就置当日标记」，一次网络抖动或服务端繁忙(102)就让会员任务与广告任务
+     * 整天停摆；改为累计到上限才停手，既给临时失败留重试机会，也避免一直撞风控。
+     */
+    private void handleFetchFailure(String reason) {
+        int failures = Status.getIntFlagToday(INT_FLAG_SIGN_PAGE_FETCH_FAIL) + 1;
+        Status.setIntFlagToday(INT_FLAG_SIGN_PAGE_FETCH_FAIL, failures);
+        if (failures >= MAX_FETCH_FAILURES) {
+            Status.flagToday(FLAG_SIGN_PAGE_TASK_FAILED);
+            Log.record("会员任务⏭️任务列表连续" + failures + "次获取失败(" + reason + ")，今日不再重试");
+        } else {
+            Log.i(TAG, "任务列表获取失败(" + reason + ")，第" + failures + "/" + MAX_FETCH_FAILURES + "次，稍后重试");
         }
     }
 
@@ -216,7 +276,12 @@ public abstract class BaseAntMember extends ModelTask {
                         taskName = cfg.optString("title", "");
                     }
                     if (!taskName.isEmpty()) {
-                        AntMemberTaskListMap.add(taskName, taskName);
+                        // 两类黑名单的候选项分开收集
+                        if (isAdTask(task)) {
+                            AntMemberAdTaskListMap.add(taskName, taskName);
+                        } else {
+                            AntMemberTaskListMap.add(taskName, taskName);
+                        }
                     }
                 }
                 if ("BROWSE".equals(type)) {
@@ -235,7 +300,13 @@ public abstract class BaseAntMember extends ModelTask {
                     }
                 }
             }
-            AntMemberTaskListMap.save();
+            // 空 map 不落盘，否则会覆盖掉磁盘上已有的任务名
+            if (!AntMemberTaskListMap.getMap().isEmpty()) {
+                AntMemberTaskListMap.save();
+            }
+            if (!AntMemberAdTaskListMap.getMap().isEmpty()) {
+                AntMemberAdTaskListMap.save();
+            }
         } catch (Throwable t) {
             Log.err(TAG, "processSignPageTaskList err:", t);
         }
@@ -340,8 +411,7 @@ public abstract class BaseAntMember extends ModelTask {
                     targetBusinessArr = new JSONArray().put(tb);
                 }
             }
-            // 广告任务判定：adTask=true 且无 targetBusiness
-            boolean isAd = task.optBoolean("adTask") && (targetBusinessArr == null || targetBusinessArr.length() == 0);
+            boolean isAd = isAdTask(task);
             if (adOnly) {
                 // 仅处理广告任务的路径：非广告任务直接跳过，交给会员路径
                 if (!isAd) {
@@ -415,12 +485,15 @@ public abstract class BaseAntMember extends ModelTask {
             JSONObject extMap = task.optJSONObject("lightsAdExtMap");
             if (extMap == null) {
                 Log.record(label + "⏭️跳过[" + name + "]#广告任务缺少扩展参数");
+                // 结构缺参数重试也不会变，按连续确认记账
+                MessageUtil.MarkTaskBlackListConfirm("AntMember", "AntMemberAdTaskList", "会员广告任务", name);
                 return false;
             }
             String bizId = extMap.optString("bizId", "");
             String adId = extMap.optString("adId", "");
             if (bizId.isEmpty() || adId.isEmpty()) {
                 Log.record(label + "⏭️跳过[" + name + "]#广告任务缺少bizId/adId");
+                MessageUtil.MarkTaskBlackListConfirm("AntMember", "AntMemberAdTaskList", "会员广告任务", name);
                 return false;
             }
             int awardNum = 0;
@@ -431,6 +504,7 @@ public abstract class BaseAntMember extends ModelTask {
             JSONObject applyJo = new JSONObject(AntMemberRpcCall.applyAdTask(bizId, adId, awardNum, extMap));
             if (!isAdTaskOk(applyJo)) {
                 Log.record(label + "⏭️跳过[" + name + "]#广告任务申请失败");
+                MessageUtil.checkResultCodeAndMarkTaskBlackList("AntMemberAdTaskList", name, applyJo);
                 return false;
             }
             // 广告任务需浏览一段时间(约15秒)后才能完成
@@ -439,6 +513,7 @@ public abstract class BaseAntMember extends ModelTask {
             JSONObject finishJo = new JSONObject(AntMemberRpcCall.finishAdTask(bizId));
             if (!isAdTaskOk(finishJo)) {
                 Log.record(label + "⏭️跳过[" + name + "]#广告任务完成失败");
+                MessageUtil.checkResultCodeAndMarkTaskBlackList("AntMemberAdTaskList", name, finishJo);
                 return false;
             }
             Log.other(label + "🎖️完成[" + name + "]#获得[" + awardNum + "积分]");
